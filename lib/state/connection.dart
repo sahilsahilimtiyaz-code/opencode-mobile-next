@@ -8082,22 +8082,22 @@ class ConnectionController extends ChangeNotifier {
 
   /// The variant [sessionID] sends with; see [modelForSession].
   String variantForSession(String sessionID) =>
-  ThinkingEffort thinkingEffortForProfile() {
-    final id = profile?.id;
-    if (id == null) return ThinkingEffort.medium;
-    return store.thinkingEffortFor(id);
-  }
+    selectionForSession(sessionID).variant;
 
-  Future<void> setThinkingEffort(ThinkingEffort effort) async {
-    final id = profile?.id;
-    if (id == null) return;
-    await store.setThinkingEffort(id, effort);
-    notifyListeners();
-  }
+ThinkingEffort thinkingEffortForProfile() {
+  final id = profile?.id;
+  if (id == null) return ThinkingEffort.medium;
+  return store.thinkingEffortFor(id);
+}
 
-      selectionForSession(sessionID).variant;
+Future<void> setThinkingEffort(ThinkingEffort effort) async {
+  final id = profile?.id;
+  if (id == null) return;
+  await store.setThinkingEffort(id, effort);
+  notifyListeners();
+}
 
-  String agentForSession(String sessionID) =>
+String agentForSession(String sessionID) =>
       selectionForSession(sessionID).agent ?? '';
 
   bool sessionSelectionSaving(String sessionID) =>
