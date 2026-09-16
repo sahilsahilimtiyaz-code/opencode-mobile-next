@@ -1,0 +1,30 @@
+# Continuous app improvement
+
+The review and implementation cycle keeps two focused queues:
+
+- [Current delivery state](current-state-2026-09-07.md): reconciled source,
+  remaining story acceptance and the active verification record.
+
+- [Execution order and evidence guardrails](roadmap-2026-09-06.md): lead-curated
+  next slices, evidence corrections, and held read-only specialist review plan.
+- [Epic/story inventory](full-backlog-2026-09-06.md) and
+  [innovation inventory](innovation-2026-09-06.md): proposed scope; presence in
+  these files is not an implementation or release-readiness claim.
+- [Backend](backend.md): protocol adapters, data handling, and connection state.
+- [Frontend](frontend.md): useful features, navigation, and everyday interactions.
+- [Completed cycles](cycles.md): shipped batches and their verification.
+- [V1 release readiness](../v1-release-readiness.md): the full release objective
+  and the evidence still needed before it can be marked complete.
+
+Each review pass adds a small number of evidence-backed, deduplicated items.
+Stable IDs preserve the history. Ready items contain a specific user problem,
+code pointers, an implementation outline, and the smallest useful verification.
+
+The implementation owner takes a coherent batch, marks it in progress, fixes it,
+runs focused checks, and records the outcome before committing and pushing.
+Completed items stay in their queue as history. Reviewers move to different
+areas while the current batch is implemented; they do not edit product code.
+
+Start subsequent cycles from the merged production baseline. Preserve unfinished
+work and unrelated artifacts before synchronizing the checkout. Follow repository
+merge requirements; do not change protection rules to speed up the cycle.

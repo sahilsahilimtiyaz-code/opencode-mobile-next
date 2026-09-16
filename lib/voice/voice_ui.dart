@@ -1,0 +1,1059 @@
+import 'dart:async';
+
+import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
+
+import 'controller.dart';
+import 'presentation.dart';
+
+import 'audio.dart';
+import 'device.dart';
+import 'model_manager.dart';
+import 'model_manifest.dart';
+import '../ui/app_theme.dart';
+import '../platform/platform_capabilities.dart';
+import '../l10n/app_localizations.dart';
+
+AppLocalizations _voiceStrings(BuildContext context) => voiceStrings(context);
+
+Future<bool> showVoiceModelSetupSheet(
+  BuildContext context,
+  VoiceModelManager manager,
+) async =>
+    platformCapabilities.supportsVoice &&
+    (await showModalBottomSheet<bool>(
+          context: context,
+          isScrollControlled: true,
+          useSafeArea: true,
+          showDragHandle: true,
+          builder: (context) => _VoiceModelSetupSheet(manager: manager),
+        ) ??
+        false);
+
+class _VoiceModelSetupSheet extends StatelessWidget {
+  const _VoiceModelSetupSheet({required this.manager});
+
+  final VoiceModelManager manager;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return AnimatedBuilder(
+      animation: manager,
+      builder: (context, _) {
+        final busy =
+            manager.state == VoiceModelState.downloading ||
+            manager.state == VoiceModelState.verifying;
+        return FractionallySizedBox(
+          heightFactor: .9,
+          child: Padding(
+            padding: EdgeInsets.fromLTRB(
+              20,
+              0,
+              20,
+              16 + MediaQuery.viewInsetsOf(context).bottom,
+            ),
+            child: SingleChildScrollView(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Row(
+                    children: [
+                      Container(
+                        width: 44,
+                        height: 44,
+                        decoration: BoxDecoration(
+                          color: theme.colorScheme.primaryContainer,
+                          borderRadius: BorderRadius.circular(14),
+                        ),
+                        child: const Icon(Icons.graphic_eq_rounded),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              _voiceStrings(context).e7VoiceUiLocalInput,
+                              style: theme.textTheme.titleLarge,
+                            ),
+                            Text(
+                              _voiceStrings(context).e7VoiceUiChooseModel,
+                              style: theme.textTheme.bodySmall,
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 16),
+                  Container(
+                    padding: const EdgeInsets.all(14),
+                    decoration: BoxDecoration(
+                      color: theme.colorScheme.surfaceContainerHighest,
+                      borderRadius: BorderRadius.circular(16),
+                      border: Border.all(
+                        color: theme.colorScheme.outlineVariant,
+                      ),
+                    ),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Icon(
+                          Icons.lock_outline_rounded,
+                          color: theme.colorScheme.primary,
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Text(
+                            _voiceStrings(context).e7VoiceUiPrivacyDownload,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 14),
+                  if (!manager.deviceInfo.hasMicrophone) ...[
+                    Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: theme.colorScheme.errorContainer,
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: Text(_voiceStrings(context).e7VoiceUiNoBuiltInMic),
+                    ),
+                    const SizedBox(height: 14),
+                  ],
+                  ListView.separated(
+                    shrinkWrap: true,
+                    physics: const NeverScrollableScrollPhysics(),
+                    itemCount: voiceModelPacks.length,
+                    separatorBuilder: (_, _) => const SizedBox(height: 8),
+                    itemBuilder: (context, index) {
+                      final pack = voiceModelPacks[index];
+                      return _VoiceModelCard(
+                        manager: manager,
+                        pack: pack,
+                        busy: busy,
+                        onDelete: () => _confirmDelete(context, pack),
+                      );
+                    },
+                  ),
+                  const SizedBox(height: 12),
+                  DropdownButtonFormField<VoiceLanguage>(
+                    key: ValueKey(manager.language),
+                    initialValue: manager.language,
+                    isExpanded: true,
+                    decoration: InputDecoration(
+                      labelText: _voiceStrings(context).e7VoiceUiLanguage,
+                      border: OutlineInputBorder(),
+                    ),
+                    items: [
+                      for (final language in VoiceLanguage.values)
+                        DropdownMenuItem(
+                          value: language,
+                          child: Text(
+                            voiceLanguageLabel(
+                              language,
+                              _voiceStrings(context),
+                            ),
+                          ),
+                        ),
+                    ],
+                    onChanged: busy
+                        ? null
+                        : (language) {
+                            if (language != null) manager.setLanguage(language);
+                          },
+                  ),
+                  if (busy) ...[
+                    const SizedBox(height: 14),
+                    Semantics(
+                      liveRegion: true,
+                      excludeSemantics: true,
+                      label: manager.state == VoiceModelState.verifying
+                          ? _voiceStrings(context).e7VoiceUiVerifying
+                          : _voiceStrings(context).e7VoiceUiDownloadPercent(
+                              ((manager.progress?.fraction ?? 0) * 10).floor() *
+                                  10,
+                            ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          LinearProgressIndicator(
+                            value: manager.state == VoiceModelState.verifying
+                                ? null
+                                : manager.progress?.fraction,
+                          ),
+                          const SizedBox(height: 6),
+                          Text(
+                            manager.state == VoiceModelState.verifying
+                                ? _voiceStrings(context).e7VoiceUiVerifyChecksum
+                                : _voiceStrings(
+                                    context,
+                                  ).e7VoiceUiDownloadProgress(
+                                    formatModelBytes(
+                                      manager.progress?.received ?? 0,
+                                    ),
+                                    formatModelBytes(
+                                      manager.selectedPack.downloadBytes,
+                                    ),
+                                  ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                  if (manager.error != null) ...[
+                    const SizedBox(height: 10),
+                    Semantics(
+                      liveRegion: true,
+                      child: Text(
+                        _voiceStrings(context).e7VoiceUiSetupFailed(
+                          voiceErrorText(
+                            manager.error,
+                            _voiceStrings(context),
+                            manager: manager,
+                          ),
+                        ),
+                        style: TextStyle(color: theme.colorScheme.error),
+                      ),
+                    ),
+                  ],
+                  if (manager.error != null)
+                    _VoiceTechnicalDetails(error: manager.error!),
+                  const SizedBox(height: 12),
+                  _AdaptiveVoiceActions(
+                    secondary: OutlinedButton(
+                      key: const Key('voice-model-secondary-action'),
+                      style: _voiceButtonStyle(),
+                      onPressed: busy
+                          ? manager.cancelDownload
+                          : () => Navigator.pop(context, false),
+                      child: Text(
+                        busy
+                            ? _voiceStrings(context).e7VoiceUiCancelDownload
+                            : _voiceStrings(context).e7VoiceUiNotNow,
+                      ),
+                    ),
+                    primary: FilledButton.icon(
+                      key: const Key('voice-model-primary-action'),
+                      style: _voiceButtonStyle(),
+                      onPressed: busy
+                          ? null
+                          : manager.isInstalled(manager.selectedPack)
+                          ? () => Navigator.pop(context, true)
+                          : manager.supportFor(manager.selectedPack).supported
+                          ? manager.downloadSelected
+                          : null,
+                      icon: Icon(
+                        manager.isInstalled(manager.selectedPack)
+                            ? Icons.mic_rounded
+                            : Icons.download_rounded,
+                      ),
+                      label: Text(
+                        manager.isInstalled(manager.selectedPack)
+                            ? _voiceStrings(context).e7VoiceUiUseModel
+                            : _voiceStrings(context).e7VoiceUiDownload,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Future<void> _confirmDelete(BuildContext context, VoiceModelPack pack) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(
+          _voiceStrings(
+            context,
+          ).e7VoiceUiDeletePack(voicePackLabel(pack, _voiceStrings(context))),
+        ),
+        content: Text(
+          _voiceStrings(
+            context,
+          ).e7VoiceUiDeleteDetail(formatModelBytes(pack.downloadBytes)),
+        ),
+        actions: [
+          TextButton(
+            style: _voiceButtonStyle(),
+            onPressed: () => Navigator.pop(context, false),
+            child: Text(_voiceStrings(context).e7VoiceUiKeep),
+          ),
+          FilledButton(
+            style: _voiceButtonStyle(),
+            onPressed: () => Navigator.pop(context, true),
+            child: Text(_voiceStrings(context).e7VoiceUiDelete),
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true) await manager.deletePack(pack);
+  }
+}
+
+class _VoiceModelCard extends StatelessWidget {
+  const _VoiceModelCard({
+    required this.manager,
+    required this.pack,
+    required this.busy,
+    required this.onDelete,
+  });
+
+  final VoiceModelManager manager;
+  final VoiceModelPack pack;
+  final bool busy;
+  final VoidCallback onDelete;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final selected = manager.selectedPack.id == pack.id;
+    final installed = manager.isInstalled(pack);
+    final support = manager.supportFor(pack);
+    final enabled = !busy && support.supported;
+    final badges = [
+      if (pack.id == 'base') _voiceStrings(context).e7VoiceUiDefaultBadge,
+      if (pack.id == 'small') _voiceStrings(context).e7VoiceUiOptionalBadge,
+      installed
+          ? _voiceStrings(context).e7VoiceUiInstalledBadge
+          : _voiceStrings(context).e7VoiceUiNotInstalledBadge,
+    ];
+
+    return Semantics(
+      container: true,
+      explicitChildNodes: true,
+      child: AnimatedContainer(
+        duration: MediaQuery.disableAnimationsOf(context)
+            ? Duration.zero
+            : const Duration(milliseconds: 160),
+        decoration: BoxDecoration(
+          color: selected
+              ? theme.colorScheme.primaryContainer.withValues(alpha: .45)
+              : theme.colorScheme.surfaceContainerLow,
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(
+            color: selected
+                ? theme.colorScheme.primary
+                : theme.colorScheme.outlineVariant,
+            width: selected ? 1.5 : 1,
+          ),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Semantics(
+              button: true,
+              selected: selected,
+              enabled: enabled,
+              excludeSemantics: true,
+              label: _voiceStrings(context).e7VoiceUiPackSemantics(
+                voicePackLabel(pack, _voiceStrings(context)),
+                formatModelBytes(pack.downloadBytes),
+                badges.join(_voiceStrings(context).e7ModelUiListSeparator),
+                voicePackDescription(pack, _voiceStrings(context)),
+              ),
+              hint: !support.supported
+                  ? voiceSupportReason(
+                      manager,
+                      pack,
+                      support,
+                      _voiceStrings(context),
+                    )
+                  : busy
+                  ? _voiceStrings(context).e7VoiceUiSetupBusy
+                  : selected
+                  ? _voiceStrings(context).e7VoiceUiSelected
+                  : _voiceStrings(context).e7VoiceUiSelectHint,
+              child: InkWell(
+                key: Key('voice-model-${pack.id}'),
+                borderRadius: BorderRadius.circular(16),
+                onTap: enabled ? () => manager.selectPack(pack) : null,
+                child: Padding(
+                  padding: const EdgeInsets.all(14),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      ConstrainedBox(
+                        constraints: const BoxConstraints(
+                          minWidth: 48,
+                          minHeight: 48,
+                        ),
+                        child: Icon(
+                          selected
+                              ? Icons.radio_button_checked_rounded
+                              : Icons.radio_button_unchecked_rounded,
+                          color: selected
+                              ? theme.colorScheme.primary
+                              : theme.colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                      const SizedBox(width: 4),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Wrap(
+                              spacing: 8,
+                              runSpacing: 4,
+                              crossAxisAlignment: WrapCrossAlignment.center,
+                              children: [
+                                Text(
+                                  voicePackLabel(pack, _voiceStrings(context)),
+                                  style: theme.textTheme.titleMedium,
+                                ),
+                                if (pack.id == 'base')
+                                  Chip(
+                                    label: Text(
+                                      _voiceStrings(context).e7VoiceUiDefault,
+                                    ),
+                                    visualDensity: VisualDensity.compact,
+                                  ),
+                                if (pack.id == 'small')
+                                  Chip(
+                                    label: Text(
+                                      _voiceStrings(context).e7VoiceUiOptional,
+                                    ),
+                                    visualDensity: VisualDensity.compact,
+                                  ),
+                                if (installed)
+                                  Chip(
+                                    avatar: Icon(Icons.check_rounded, size: 16),
+                                    label: Text(
+                                      _voiceStrings(context).e7VoiceUiInstalled,
+                                    ),
+                                    visualDensity: VisualDensity.compact,
+                                  ),
+                              ],
+                            ),
+                            const SizedBox(height: 3),
+                            Text(
+                              _voiceStrings(context).e7VoiceUiDownloadSize(
+                                formatModelBytes(pack.downloadBytes),
+                              ),
+                              style: theme.textTheme.labelLarge,
+                            ),
+                            const SizedBox(height: 3),
+                            Text(
+                              voicePackDescription(
+                                pack,
+                                _voiceStrings(context),
+                              ),
+                              style: theme.textTheme.bodySmall,
+                            ),
+                            if (!support.supported) ...[
+                              const SizedBox(height: 6),
+                              Text(
+                                voiceSupportReason(
+                                  manager,
+                                  pack,
+                                  support,
+                                  _voiceStrings(context),
+                                )!,
+                                style: TextStyle(
+                                  color: theme.colorScheme.error,
+                                ),
+                              ),
+                            ],
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+            if (installed && !busy)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(14, 0, 14, 8),
+                child: Wrap(
+                  spacing: 4,
+                  runSpacing: 4,
+                  children: [
+                    TextButton.icon(
+                      key: Key('voice-redownload-${pack.id}'),
+                      style: _voiceButtonStyle(),
+                      onPressed: () => manager.redownloadPack(pack),
+                      icon: const Icon(Icons.refresh_rounded),
+                      label: Text(_voiceStrings(context).e7VoiceUiRedownload),
+                    ),
+                    TextButton.icon(
+                      key: Key('voice-delete-${pack.id}'),
+                      style: _voiceButtonStyle(),
+                      onPressed: onDelete,
+                      icon: const Icon(Icons.delete_outline_rounded),
+                      label: Text(_voiceStrings(context).e7VoiceUiDelete),
+                    ),
+                  ],
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _AdaptiveVoiceActions extends StatelessWidget {
+  const _AdaptiveVoiceActions({
+    required this.secondary,
+    required this.primary,
+    this.tertiary,
+  });
+
+  final Widget secondary;
+  final Widget primary;
+
+  /// An optional third action shown after [primary]; three labels need more
+  /// width before they fit on one row.
+  final Widget? tertiary;
+
+  @override
+  Widget build(BuildContext context) => LayoutBuilder(
+    builder: (context, constraints) {
+      final tertiary = this.tertiary;
+      final stack =
+          constraints.maxWidth < (tertiary == null ? 360 : 540) ||
+          MediaQuery.textScalerOf(context).scale(1) > 1.3;
+      if (stack) {
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            secondary,
+            const SizedBox(height: 8),
+            primary,
+            if (tertiary != null) ...[const SizedBox(height: 8), tertiary],
+          ],
+        );
+      }
+      return Row(
+        children: [
+          Expanded(child: secondary),
+          const SizedBox(width: 10),
+          Expanded(child: primary),
+          if (tertiary != null) ...[
+            const SizedBox(width: 10),
+            Expanded(child: tertiary),
+          ],
+        ],
+      );
+    },
+  );
+}
+
+/// What the voice sheet hands back: the reviewed transcript and whether the
+/// user asked for it to be sent right away ("Insert & send") rather than
+/// only inserted into the composer.
+class VoiceComposerResult {
+  const VoiceComposerResult({required this.text, this.send = false});
+
+  final String text;
+  final bool send;
+}
+
+/// The recording cap the controller enforces; stated up front so the user
+/// knows how long they have before pressing the microphone.
+const voiceRecordingCap = Duration(seconds: 30);
+
+ButtonStyle _voiceButtonStyle() =>
+    const ButtonStyle(minimumSize: WidgetStatePropertyAll(Size(48, 48)));
+
+Future<String?> showVoiceComposerSheet(
+  BuildContext context,
+  VoiceComposerController controller,
+) async => (await showVoiceComposerResultSheet(context, controller))?.text;
+
+/// The voice sheet with its full result. Dragging it down or tapping outside
+/// dismisses it; either path cancels any recording in flight first.
+Future<VoiceComposerResult?> showVoiceComposerResultSheet(
+  BuildContext context,
+  VoiceComposerController controller, {
+  bool conversation = false,
+  ValueListenable<int>? validity,
+  bool Function()? isCurrent,
+}) => !platformCapabilities.supportsVoice
+    ? Future.value(null)
+    : showModalBottomSheet<VoiceComposerResult>(
+        context: context,
+        isScrollControlled: true,
+        useSafeArea: true,
+        showDragHandle: true,
+        isDismissible: true,
+        enableDrag: true,
+        builder: (context) => _VoiceComposerSheet(
+          controller: controller,
+          conversation: conversation,
+          validity: validity,
+          isCurrent: isCurrent,
+        ),
+      );
+
+class _VoiceComposerSheet extends StatefulWidget {
+  const _VoiceComposerSheet({
+    required this.controller,
+    this.conversation = false,
+    this.validity,
+    this.isCurrent,
+  });
+
+  final VoiceComposerController controller;
+  final bool conversation;
+  final ValueListenable<int>? validity;
+  final bool Function()? isCurrent;
+
+  @override
+  State<_VoiceComposerSheet> createState() => _VoiceComposerSheetState();
+}
+
+class _VoiceComposerSheetState extends State<_VoiceComposerSheet>
+    with WidgetsBindingObserver {
+  final TextEditingController _draft = TextEditingController();
+  String _syncedDraft = '';
+  bool _interrupted = false;
+  bool get _current => !_interrupted && (widget.isCurrent?.call() ?? true);
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    widget.validity?.addListener(_scopeChanged);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && _current && !widget.conversation) {
+        unawaited(widget.controller.startListening());
+      }
+    });
+  }
+
+  void _scopeChanged() {
+    if (!_current && mounted) _interrupt();
+  }
+
+  void _interrupt() {
+    _interrupted = true;
+    _draft.clear();
+    _syncedDraft = '';
+    unawaited(widget.controller.cancel());
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state != AppLifecycleState.resumed) _interrupt();
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final route = ModalRoute.of(context);
+    if (!(route?.isCurrent ?? true)) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && !(route?.isCurrent ?? true)) _interrupt();
+      });
+    }
+  }
+
+  Future<void> _close() async {
+    await widget.controller.cancel();
+    if (mounted) Navigator.pop(context);
+  }
+
+  Future<void> _insert({required bool send}) async {
+    final text = _draft.text.trim();
+    if (text.isEmpty || !_current) return;
+    await widget.controller.cancel();
+    if (mounted && _current) {
+      Navigator.pop(context, VoiceComposerResult(text: text, send: send));
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return PopScope(
+      canPop: true,
+      // A drag-down, tap-outside or back gesture pops first; the recorder is
+      // stopped right behind it so no capture outlives the sheet. Cancel is
+      // idempotent, so the explicit Cancel/Insert paths are unaffected.
+      onPopInvokedWithResult: (didPop, _) {
+        if (didPop) unawaited(widget.controller.cancel());
+      },
+      child: AnimatedBuilder(
+        animation: widget.controller,
+        builder: (context, _) {
+          final controller = widget.controller;
+          if (!_current) {
+            return Padding(
+              padding: const EdgeInsets.all(20),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(_voiceStrings(context).voiceInputInterrupted),
+                  TextButton(
+                    onPressed: _close,
+                    style: _voiceButtonStyle(),
+                    child: Text(_voiceStrings(context).voiceInputClose),
+                  ),
+                ],
+              ),
+            );
+          }
+          if (controller.state == VoiceComposerState.draft &&
+              controller.draft != _syncedDraft) {
+            _syncedDraft = controller.draft;
+            _draft.value = TextEditingValue(
+              text: controller.draft,
+              selection: TextSelection.collapsed(
+                offset: controller.draft.length,
+              ),
+            );
+          }
+          return Padding(
+            padding: EdgeInsets.fromLTRB(
+              20,
+              0,
+              20,
+              16 + MediaQuery.viewInsetsOf(context).bottom,
+            ),
+            child: SingleChildScrollView(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  _VoiceStatus(controller: controller),
+                  if (widget.conversation) ...[
+                    const SizedBox(height: 12),
+                    Text(_voiceStrings(context).voiceConversationInstructions),
+                  ],
+                  const SizedBox(height: 16),
+                  if (controller.state == VoiceComposerState.draft)
+                    TextField(
+                      key: const Key('voice-draft-field'),
+                      controller: _draft,
+                      minLines: 3,
+                      maxLines: 8,
+                      autofocus: true,
+                      decoration: InputDecoration(
+                        labelText: _voiceStrings(
+                          context,
+                        ).e7VoiceUiReviewTranscript,
+                        helperText: _voiceStrings(
+                          context,
+                        ).voiceReviewExplicitAction,
+                        alignLabelWithHint: true,
+                        border: const OutlineInputBorder(),
+                      ),
+                    ),
+                  if (controller.state == VoiceComposerState.error) ...[
+                    Semantics(
+                      liveRegion: true,
+                      child: Text(
+                        voiceErrorText(
+                          controller.error,
+                          _voiceStrings(context),
+                          manager: controller.models,
+                        ),
+                        style: TextStyle(
+                          color: Theme.of(context).colorScheme.error,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    if (controller.error != null)
+                      _VoiceTechnicalDetails(error: controller.error!),
+                    if (controller.error is VoicePermissionDenied &&
+                        (controller.error! as VoicePermissionDenied).permanent)
+                      OutlinedButton.icon(
+                        style: _voiceButtonStyle(),
+                        onPressed: voiceDevicePlatform.openAppSettings,
+                        icon: const Icon(Icons.settings_outlined),
+                        label: Text(
+                          _voiceStrings(context).e7VoiceUiOpenSettings,
+                        ),
+                      ),
+                    FilledButton.icon(
+                      style: _voiceButtonStyle(),
+                      onPressed: controller.startListening,
+                      icon: const Icon(Icons.refresh_rounded),
+                      label: Text(_voiceStrings(context).e7VoiceUiRetry),
+                    ),
+                  ],
+                  if (controller.state == VoiceComposerState.idle) ...[
+                    FilledButton.icon(
+                      style: _voiceButtonStyle(),
+                      onPressed: controller.startListening,
+                      icon: const Icon(Icons.mic_rounded),
+                      label: Text(
+                        _voiceStrings(context).e7VoiceUiStartListening,
+                      ),
+                    ),
+                  ],
+                  const SizedBox(height: 16),
+                  if (controller.state == VoiceComposerState.draft)
+                    _AdaptiveVoiceActions(
+                      secondary: OutlinedButton(
+                        key: const Key('voice-composer-cancel'),
+                        style: _voiceButtonStyle(),
+                        onPressed: _close,
+                        child: Text(_voiceStrings(context).e7VoiceUiCancel),
+                      ),
+                      primary: FilledButton.icon(
+                        key: const Key('insert-voice-draft'),
+                        style: _voiceButtonStyle(),
+                        onPressed: () => unawaited(_insert(send: false)),
+                        icon: const Icon(Icons.add_rounded),
+                        label: Text(_voiceStrings(context).e7VoiceUiInsert),
+                      ),
+                      tertiary: widget.conversation
+                          ? null
+                          : FilledButton.tonalIcon(
+                              key: const Key('insert-voice-draft-send'),
+                              style: _voiceButtonStyle(),
+                              onPressed: () => unawaited(_insert(send: true)),
+                              icon: const Icon(Icons.arrow_upward_rounded),
+                              label: Text(
+                                _voiceStrings(context).e7VoiceUiInsertSend,
+                              ),
+                            ),
+                    )
+                  else
+                    OutlinedButton(
+                      key: const Key('voice-composer-cancel'),
+                      style: _voiceButtonStyle(),
+                      onPressed: _close,
+                      child: Text(_voiceStrings(context).e7VoiceUiCancel),
+                    ),
+                  const SizedBox(height: 8),
+                  TextButton.icon(
+                    style: _voiceButtonStyle(),
+                    onPressed:
+                        controller.state == VoiceComposerState.listening ||
+                            controller.state ==
+                                VoiceComposerState.initializing ||
+                            controller.state == VoiceComposerState.loading ||
+                            controller.state ==
+                                VoiceComposerState.finishingCancellation ||
+                            controller.state == VoiceComposerState.transcribing
+                        ? null
+                        : () async {
+                            final ready = await showVoiceModelSetupSheet(
+                              context,
+                              controller.models,
+                            );
+                            if (ready && context.mounted) setState(() {});
+                          },
+                    icon: const Icon(Icons.tune_rounded),
+                    label: Text(
+                      '${voicePackLabel(controller.models.selectedPack, _voiceStrings(context))} · ${voiceLanguageLabel(controller.models.language, _voiceStrings(context))}',
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  @override
+  void dispose() {
+    widget.validity?.removeListener(_scopeChanged);
+    WidgetsBinding.instance.removeObserver(this);
+    unawaited(widget.controller.cancel());
+    _draft.dispose();
+    super.dispose();
+  }
+}
+
+class _VoiceStatus extends StatelessWidget {
+  const _VoiceStatus({required this.controller});
+
+  final VoiceComposerController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final listening = controller.state == VoiceComposerState.listening;
+    final capSeconds = voiceRecordingCap.inSeconds;
+    // While listening the status line already says "of 0:30"; before that
+    // the cap gets its own line so it is known before the mic starts.
+    final showCap =
+        controller.state == VoiceComposerState.idle ||
+        controller.state == VoiceComposerState.initializing ||
+        controller.state == VoiceComposerState.loading;
+    final status = switch (controller.state) {
+      VoiceComposerState.listening =>
+        _voiceStrings(context).e7VoiceUiListeningTime(
+          _formatElapsed(controller.elapsed),
+          _formatElapsed(voiceRecordingCap),
+        ),
+      VoiceComposerState.initializing => _voiceStrings(
+        context,
+      ).e7VoiceUiStartingMic,
+      VoiceComposerState.loading => _voiceStrings(
+        context,
+      ).e7VoiceUiLoadingModel,
+      VoiceComposerState.transcribing => _voiceStrings(
+        context,
+      ).e7VoiceUiTranscribing,
+      VoiceComposerState.finishingCancellation => _voiceStrings(
+        context,
+      ).e7VoiceUiFinishingCancel,
+      VoiceComposerState.draft => _voiceStrings(context).e7VoiceUiDraftReady,
+      VoiceComposerState.error => _voiceStrings(
+        context,
+      ).e7VoiceUiNeedsAttention,
+      VoiceComposerState.idle => _voiceStrings(context).e7VoiceUiReady,
+      VoiceComposerState.modelRequired => _voiceStrings(
+        context,
+      ).e7VoiceUiModelRequired,
+      VoiceComposerState.downloading => _voiceStrings(
+        context,
+      ).e7VoiceUiDownloading,
+      VoiceComposerState.verifying => _voiceStrings(
+        context,
+      ).e7VoiceUiVerifyingModel,
+    };
+    return Column(
+      children: [
+        Container(
+          width: 76,
+          height: 76,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            color: listening
+                ? theme.colorScheme.errorContainer
+                : theme.colorScheme.primaryContainer,
+            border: Border.all(
+              color: listening
+                  ? theme.colorScheme.error
+                  : theme.colorScheme.primary,
+              width: 2,
+            ),
+          ),
+          child: Icon(
+            listening ? Icons.mic_rounded : Icons.graphic_eq_rounded,
+            size: 34,
+            color: listening
+                ? theme.colorScheme.error
+                : theme.colorScheme.primary,
+          ),
+        ),
+        const SizedBox(height: 12),
+        Semantics(
+          liveRegion: true,
+          label: listening
+              ? _voiceStrings(context).e7VoiceUiListeningHint
+              : status,
+          excludeSemantics: true,
+          child: Text(
+            status,
+            style: theme.textTheme.titleMedium,
+            textAlign: TextAlign.center,
+          ),
+        ),
+        const SizedBox(height: 4),
+        Text(
+          _voiceStrings(context).e7VoiceUiPrivacy,
+          textAlign: TextAlign.center,
+        ),
+        if (showCap)
+          Padding(
+            padding: const EdgeInsets.only(top: 2),
+            child: Text(
+              _voiceStrings(context).e7VoiceUiRecordingCap(capSeconds),
+              key: const Key('voice-recording-cap'),
+              textAlign: TextAlign.center,
+              style: theme.textTheme.labelSmall?.copyWith(
+                color: AppTheme.mutedOf(theme),
+              ),
+            ),
+          ),
+        if (listening) ...[
+          const SizedBox(height: 14),
+          _LevelMeter(level: controller.level),
+          const SizedBox(height: 14),
+          SizedBox(
+            width: double.infinity,
+            child: FilledButton.icon(
+              key: const Key('stop-voice-recording'),
+              style: FilledButton.styleFrom(
+                backgroundColor: theme.colorScheme.error,
+                foregroundColor: theme.colorScheme.onError,
+                minimumSize: const Size(48, 48),
+              ),
+              onPressed: controller.stopListening,
+              icon: const Icon(AppIcons.stop),
+              label: Text(_voiceStrings(context).e7VoiceUiStopRecording),
+            ),
+          ),
+        ],
+        if (controller.state == VoiceComposerState.initializing ||
+            controller.state == VoiceComposerState.loading ||
+            controller.state == VoiceComposerState.finishingCancellation ||
+            controller.state == VoiceComposerState.transcribing)
+          const Padding(
+            padding: EdgeInsets.only(top: 14),
+            child: LinearProgressIndicator(),
+          ),
+      ],
+    );
+  }
+}
+
+class _LevelMeter extends StatelessWidget {
+  const _LevelMeter({required this.level});
+
+  final double level;
+
+  @override
+  Widget build(BuildContext context) {
+    final color = Theme.of(context).colorScheme.error;
+    return ExcludeSemantics(
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: List.generate(9, (index) {
+          final threshold = (index + 1) / 12;
+          return Container(
+            width: 6,
+            height: 12.0 + (index - 4).abs() * 2,
+            margin: const EdgeInsets.symmetric(horizontal: 2),
+            decoration: BoxDecoration(
+              color: level >= threshold ? color : color.withValues(alpha: .2),
+              borderRadius: BorderRadius.circular(4),
+            ),
+          );
+        }),
+      ),
+    );
+  }
+}
+
+String _formatElapsed(Duration duration) {
+  final seconds = duration.inSeconds.clamp(0, voiceRecordingCap.inSeconds);
+  return '0:${seconds.toString().padLeft(2, '0')}';
+}
+
+class _VoiceTechnicalDetails extends StatelessWidget {
+  const _VoiceTechnicalDetails({required this.error});
+  final Object error;
+  @override
+  Widget build(BuildContext context) => ExpansionTile(
+    title: Text(_voiceStrings(context).e7VoiceUiTechnicalDetails),
+    children: [
+      Padding(
+        padding: const EdgeInsets.all(12),
+        child: SelectableText(
+          error.toString(),
+          textDirection: TextDirection.ltr,
+          style: const TextStyle(fontFamily: AppTheme.monoFamily),
+        ),
+      ),
+    ],
+  );
+}

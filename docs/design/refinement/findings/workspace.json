@@ -1,0 +1,195 @@
+[
+  {
+    "id": "WORKSPACE-01",
+    "page": "Workspace",
+    "title": "Inconsistent project, session and status rails",
+    "priority": "P2",
+    "dimension": "layout",
+    "evidence": [
+      "/tmp/oc-ui-audit-20260909/02-latest-workspace.png",
+      "/home/eslam/Storage/Code/oc_app-ui-workspace/lib/ui/screens/workspace_screen.dart:533",
+      "docs/qa/workspace-page-2026-09-09/before-dark-1x.png",
+      "docs/qa/workspace-page-2026-09-09/focused-tests.txt",
+      "docs/qa/workspace-page-2026-09-09/after-recent-dark-1x.png",
+      "docs/qa/workspace-page-2026-09-09/after-empty-light-2x.png"
+    ],
+    "observed": "The integration checkpoint uses project/session/status text rails around 60/56/44dp.",
+    "impact": "Eye movement zigzags across the three pieces of one project context.",
+    "proposal": "Use 16dp outer padding, 32dp leading slot and 12dp gap for a 60dp text rail.",
+    "status": "tested",
+    "verification": "Pinned Shorebird Flutter 3.47.2: 63 serial focused tests passed across workspace_hierarchy, return_brief_widget, projects_screen, session_needs_you and the eight-case capture fixture. All eight after captures inspected; format and diff check clean. Shared shell/type/icons and APK performance remain integration gates.",
+    "commit": "689c0029e3e2506df2508294f404a4c5e6f0ea56"
+  },
+  {
+    "id": "WORKSPACE-02",
+    "page": "Workspace",
+    "title": "Duplicate New session actions in empty Workspace",
+    "priority": "P2",
+    "dimension": "flow",
+    "evidence": [
+      "/tmp/oc-ui-audit-20260909/02-latest-workspace.png",
+      "/home/eslam/Storage/Code/oc_app-ui-workspace/lib/ui/screens/workspace_screen.dart:743",
+      "docs/qa/workspace-page-2026-09-09/before-dark-1x.png",
+      "docs/qa/workspace-page-2026-09-09/focused-tests.txt",
+      "docs/qa/workspace-page-2026-09-09/after-recent-dark-1x.png",
+      "docs/qa/workspace-page-2026-09-09/after-empty-light-2x.png"
+    ],
+    "observed": "ProductInlineEmpty and the fixed bottom action both offer New session; the fixed button also nests redundant semantics.",
+    "impact": "One simple start decision has two competing controls, especially prominent when inventory is empty.",
+    "proposal": "Keep one fixed accessible New session button and a descriptive empty state.",
+    "status": "tested",
+    "verification": "Pinned Shorebird Flutter 3.47.2: 63 serial focused tests passed across workspace_hierarchy, return_brief_widget, projects_screen, session_needs_you and the eight-case capture fixture. All eight after captures inspected; format and diff check clean. Shared shell/type/icons and APK performance remain integration gates.",
+    "commit": "689c0029e3e2506df2508294f404a4c5e6f0ea56"
+  },
+  {
+    "id": "WORKSPACE-03",
+    "page": "Workspace",
+    "title": "Session names truncate at one line",
+    "priority": "P2",
+    "dimension": "accessibility",
+    "evidence": [
+      "/tmp/oc-ui-audit-20260909/02-latest-workspace.png",
+      "/home/eslam/Storage/Code/oc_app-ui-workspace/lib/ui/screens/workspace_screen.dart:1377",
+      "docs/qa/workspace-page-2026-09-09/before-dark-1x.png",
+      "docs/qa/workspace-page-2026-09-09/focused-tests.txt",
+      "docs/qa/workspace-page-2026-09-09/after-recent-dark-1x.png",
+      "docs/qa/workspace-page-2026-09-09/after-empty-light-2x.png"
+    ],
+    "observed": "Workspace session titles have maxLines: 1, including at 2x text.",
+    "impact": "Returning developers lose distinguishing task words even when the page has spare space.",
+    "proposal": "Allow two title lines and keep tap-to-resume behavior unchanged.",
+    "status": "tested",
+    "verification": "Pinned Shorebird Flutter 3.47.2: 63 serial focused tests passed across workspace_hierarchy, return_brief_widget, projects_screen, session_needs_you and the eight-case capture fixture. All eight after captures inspected; format and diff check clean. Shared shell/type/icons and APK performance remain integration gates.",
+    "commit": "689c0029e3e2506df2508294f404a4c5e6f0ea56"
+  },
+  {
+    "id": "WORKSPACE-04",
+    "page": "Workspace",
+    "title": "Bottom action edge and gap disagree with navigation",
+    "priority": "P2",
+    "dimension": "layout",
+    "evidence": [
+      "/tmp/oc-ui-audit-20260909/02-latest-workspace.png",
+      "/home/eslam/Storage/Code/oc_app-ui-workspace/lib/ui/screens/workspace_screen.dart:811",
+      "docs/qa/workspace-page-2026-09-09/before-dark-1x.png",
+      "docs/qa/workspace-page-2026-09-09/focused-tests.txt",
+      "docs/qa/workspace-page-2026-09-09/after-recent-dark-1x.png",
+      "docs/qa/workspace-page-2026-09-09/after-empty-light-2x.png"
+    ],
+    "observed": "The visible button starts 18dp from the edge because 12dp outer and 6dp inner paddings stack; button-to-dock gap is 24dp.",
+    "impact": "Two stacked control regions consume space without a shared edge.",
+    "proposal": "Use 16dp visible action edge, no invisible 6dp tray, and 6dp bottom spacing to combine with the shell 6dp top gap.",
+    "status": "tested",
+    "verification": "Pinned Shorebird Flutter 3.47.2: 63 serial focused tests passed across workspace_hierarchy, return_brief_widget, projects_screen, session_needs_you and the eight-case capture fixture. All eight after captures inspected; format and diff check clean. Shared shell/type/icons and APK performance remain integration gates.",
+    "commit": "689c0029e3e2506df2508294f404a4c5e6f0ea56"
+  },
+  {
+    "id": "WORKSPACE-05",
+    "page": "Workspace",
+    "title": "Session metadata competes with the task name",
+    "priority": "P2",
+    "dimension": "type",
+    "evidence": [
+      "/tmp/oc-ui-audit-20260909/02-latest-workspace.png",
+      "/home/eslam/Storage/Code/oc_app-ui-workspace/lib/ui/screens/workspace_screen.dart:1540",
+      "docs/qa/workspace-page-2026-09-09/before-dark-1x.png",
+      "docs/qa/workspace-page-2026-09-09/focused-tests.txt",
+      "docs/qa/workspace-page-2026-09-09/after-recent-dark-1x.png",
+      "docs/qa/workspace-page-2026-09-09/after-empty-light-2x.png"
+    ],
+    "observed": "Relative time and status inherit ListTile subtitle typography while names are limited to one line.",
+    "impact": "Metadata receives space and emphasis that should aid task recognition.",
+    "proposal": "Use bodySmall supporting metadata while retaining colored blocker emphasis and full session title semantics.",
+    "status": "tested",
+    "verification": "Pinned Shorebird Flutter 3.47.2: 63 serial focused tests passed across workspace_hierarchy, return_brief_widget, projects_screen, session_needs_you and the eight-case capture fixture. All eight after captures inspected; format and diff check clean. Shared shell/type/icons and APK performance remain integration gates.",
+    "commit": "689c0029e3e2506df2508294f404a4c5e6f0ea56"
+  },
+  {
+    "id": "WORKSPACE-06",
+    "page": "Workspace",
+    "title": "List entrance choreography lacks runtime scroll evidence",
+    "priority": "P2",
+    "dimension": "motion",
+    "evidence": [
+      "/tmp/oc-ui-audit-20260909/02-latest-workspace.png",
+      "/home/eslam/Storage/Code/oc_app-ui-workspace/lib/ui/screens/workspace_screen.dart:765",
+      "docs/qa/workspace-page-2026-09-09/before-dark-1x.png",
+      "test/workspace_hierarchy_test.dart",
+      "docs/qa/e7-workspace/README.md"
+    ],
+    "observed": "Recent sessions use EntranceReveal with staggered index-based entry.",
+    "impact": "Newly materialized rows may appear to arrive after scrolling; no frame evidence confirms this here.",
+    "proposal": "Render recent session rows immediately, matching other inventory sections; retain shared dock and busy-state motion.",
+    "status": "implemented",
+    "verification": "Regression test scrolls 40 sessions away and back and verifies the returning row is immediately rendered without an entrance reveal. Native frame-time measurement remains an integration gate; this does not claim an FPS improvement.",
+    "commit": null
+  },
+  {
+    "id": "WORKSPACE-07",
+    "page": "Workspace",
+    "title": "Repeated partial-inventory notices compete with sessions",
+    "priority": "P2",
+    "dimension": "density",
+    "evidence": [
+      "docs/qa/e7-workspace/README.md",
+      "docs/qa/oc2-setup/native/delivered-cold-restart-ready.png"
+    ],
+    "observed": "Return brief, recent empty state and footer repeated loaded/incomplete status; partial archive rows added a third loaded count.",
+    "impact": "One inventory condition dominates the session-first page.",
+    "proposal": "Keep loading/error/continuation truth in the footer and preserve separate stale/read-state warnings.",
+    "status": "implemented",
+    "verification": "Focused English/RTL tests and captures are recorded in the slice evidence; final integration/native checks are separate.",
+    "commit": null
+  },
+  {
+    "id": "WORKSPACE-08",
+    "page": "Workspace",
+    "title": "Global search and loaded-folder filters imply the same scope",
+    "priority": "P2",
+    "dimension": "flow",
+    "evidence": [
+      "docs/qa/e7-workspace/README.md",
+      "docs/qa/oc2-setup/native/delivered-cold-restart-ready.png"
+    ],
+    "observed": "A server-wide title search opens from Recent; folder chips narrow only loaded global results.",
+    "impact": "Users may mistake loaded matches for complete project history.",
+    "proposal": "Name every-project title search and label partial summaries and folder filtering as loaded results.",
+    "status": "implemented",
+    "verification": "Focused English/RTL tests and captures are recorded in the slice evidence; final integration/native checks are separate.",
+    "commit": null
+  },
+  {
+    "id": "WORKSPACE-09",
+    "page": "Workspace",
+    "title": "RTL reverses path punctuation and fixed filters clip scaled text",
+    "priority": "P2",
+    "dimension": "accessibility",
+    "evidence": [
+      "docs/qa/e7-workspace/README.md",
+      "docs/qa/oc2-setup/native/delivered-cold-restart-ready.png"
+    ],
+    "observed": "A font-loaded RTL capture paints /work/shop as work/shop/; global filter rows assume 48dp height.",
+    "impact": "Paths become misleading and filters crowd user-scaled labels.",
+    "proposal": "Keep path-only values LTR and derive filter height from user text scale.",
+    "status": "implemented",
+    "verification": "Focused English/RTL tests and captures are recorded in the slice evidence; final integration/native checks are separate.",
+    "commit": null
+  },
+  {
+    "id": "WORKSPACE-10",
+    "page": "Workspace",
+    "title": "Unsupported stale form state marks return brief stale",
+    "priority": "P2",
+    "dimension": "flow",
+    "evidence": [
+      "docs/qa/e7-workspace/README.md",
+      "docs/qa/oc2-setup/native/delivered-cold-restart-ready.png"
+    ],
+    "observed": "Old forms loading/error flags contribute stale status without checking forms support.",
+    "impact": "A connection that cannot provide forms reports uncertainty for an irrelevant feature.",
+    "proposal": "Gate form stale state on its capability while preserving supported request failures.",
+    "status": "implemented",
+    "verification": "Focused English/RTL tests and captures are recorded in the slice evidence; final integration/native checks are separate.",
+    "commit": null
+  }
+]

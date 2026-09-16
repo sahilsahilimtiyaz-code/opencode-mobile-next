@@ -1,0 +1,58 @@
+# V1 release readiness
+
+Objective: release the app with complete feature parity and polished UI/UX.
+This is an active delivery checklist, not a claim that the release is ready.
+As checked on **13 September 2026**, the stabilization base `5e3b8a4` declares
+**1.0.42+47**. GitHub has eight releases, all marked prerelease, and no stable
+release. The current stabilization evidence and remaining gates live in
+[the candidate record](verification/stable-ui-2026-09-13.md). No signed candidate
+or publication is claimed by that source work. The focused 1.0.35+36 CI APK's
+[older verification](verification/empty-project-session-recovery-2026-09-07.md)
+does not validate later source. The public
+[1.0.34+35 release is marked BROKEN](https://github.com/Eslamasabry/opencode-mobile-next/releases/tag/v1.0.34%2B35)
+for hidden session access when no projects appear.
+
+Use the [target user and product priorities](product-persona.md) to sequence work:
+the primary Android journey is resume, compose, monitor, unblock and review.
+Supporting and advanced features remain in the full parity scope.
+
+## Completion evidence
+
+The cycle inventory below is historical implementation evidence. It must be
+reconciled against the candidate record before any row is used as release proof.
+
+| Requirement | Evidence needed | Current state |
+|---|---|---|
+| Supported v1 and v2 workflows work end to end | Current feature matrix reconciled with implementation, protocol fixtures, and live server exercises | Incomplete. Cycle 20 adds searchable active context with pinned-server filtering/read verification; see [context evidence](verification/active-context.md). Cycle 19 adds client skill activation with explicit resume and scope/revert guards; live validation remains pending after empty catalog discovery in the pinned Windows fixture. See [skill evidence](verification/session-skills.md), [backend backlog](backlog/backend.md), the [v2 matrix](opencode2-port-matrix.md), and open feature issues; older phase checkboxes are not sufficient. |
+| Large histories and global search remain complete | Multiple-page sessions and messages, including newest messages beyond the old fetch cap | Client pagination implemented: global finder, message history, and scoped v2 session inventory preserve server cursors, including empty pages. Recent, Archived, and command destinations load older sessions; direct session reads cover chats outside loaded inventory. Pinned v1 scoped listing retains its native contract without an invented cursor; its global endpoint has an upstream timestamp-tie limitation documented in the backlog. Final live-server coverage remains part of release verification. |
+| Provider setup, catalogs, and MCP setup retain location and recover from failures | Request scope, completed OAuth confirmation, timeout encoding, handled concurrent errors | BE-006–009 implemented. Cycle 13 corrects BE-011: v2 adds at runtime in the selected location, with the restart limit verified live; v1 retains persistent project/global save. Final native workflow verification remains part of release validation. |
+| Daily mobile flows preserve input and show current server truth | New-chat commands, refresh failures, connection edits during probes, review selection, per-session model/agent state, resolved requests, unread completions and session notes | Partial: FE-005/006/009 implemented in cycle 03; review selection/patch retention and Files Back in cycle 04. V2 selections and offline snapshots implemented in cycle 07. Staged revert implemented in cycle 08 with pinned-server file/history verification. Cycle 09 implements scoped permission/question sheets and shared reply guards. Cycle 10 implements unread completions, foreground read receipts and privacy opt-out/local fallback. Cycle 11 implements the bounded agent note with draft/conflict protection and pinned-server authorization, size and storage verification. Cycle 16 adds local pinned conversations. Cycle 17 adds the per-server prompt stash and recoverable sent-text history navigation. Cycle 21 makes ordinary text-draft saves acknowledged, server-scoped, serialized and retryable, with no silent capacity eviction; see [draft evidence](verification/draft-recovery.md). Cycle 22 adds automatic attachment recovery using app-private files, explicit partial recovery and save-before-navigation. Cycle 23 adds Android camera/photo-library input and scoped interrupted-picker recovery; see [photo evidence](verification/prompt-photos.md). Cycle 24 adds explicit review and text recovery for ambiguous multi-profile legacy drafts and fixes the camera-recovery startup regression. Native interruption/upgrade validation remains incomplete. Remaining linked workflows and final cross-client/device verification are pending. |
+| UI is usable at compact widths and enlarged text | Purposeful rendered review of welcome, chat/composer, providers, workspace/files, permissions/forms, review, and settings | Partial: existing composer evidence plus focused layout checks. Cycle 18 adds inline transcript find, match navigation/highlights, long-message source excerpts and cancellable full-history search; see [search evidence](verification/transcript-search.md). New final release candidate needs a visual pass covering changed flows. |
+| Usage totals reflect the selected period and project | Server aggregation, device timezone, empty/error states and capability checks | Cycle 12 implements Settings usage and cost with four calendar ranges, all/current-project scope, tokens, models and tool reliability. Thirty focused checks and the [pinned-server fixture](verification/usage-beta-18600.md) passed. Native timezone plugin integration still needs platform CI and the final device smoke. |
+| Complete conversation export and transfer | Full server response, truthful redaction, explicit import destination and conflict behavior | Cycle 14 implements JSON export and verifies both redaction modes against pinned beta-18600. Sanitization replaces original text with placeholders; the UI explains the unredacted backup option. Cycle 15 implements import review and verifies transfer between two servers, source preservation and parent/conflict behavior. Native picker/device smoke remains; mobile import is limited to 128 MiB. See [export evidence](verification/export-beta-18600.md) and [import evidence](verification/import-beta-18600.md). |
+| Existing users can install the release predictably | Exact APK package/version/signer/checksum; install and upgrade smoke evidence with data-preservation behavior documented | Not verified for a final release candidate. Preserve the installed signer. Maintainer replacements must retain stable CI certificate `2D010C2103CB2F78ABAACA690EAD4D45F8003A6C0A02082CD2A2AE62FD18D0EC`; never substitute or rotate it. Historical public signing provenance is in the [release notes](release-alpha-notes.md). |
+| Final source and artifacts pass release gates | Clean merged commit, full platform CI, Android release build/lint, signed artifact verification and physical-device smoke | Pending final candidate. Prior clean builds are supporting evidence only. |
+| Public release is available and accurately documented | Published GitHub release, verified downloadable artifacts, matching tag/source/version, current notes and compatibility limits | Pending stable v1. All eight public release entries inspected on 13 September 2026 are prereleases. Public 1.0.34+35 remains marked BROKEN. Historical preview artifacts do not verify source 1.0.42+47. |
+
+## Delivery order
+
+1. Complete the ready correctness and missing-workflow backlog while keeping both
+   protocol adapters working. Reconcile feature issues rather than duplicating
+   them or hiding supported features behind permanent capability gates.
+2. Verify the implemented pagination and
+   model/agent synchronization against live servers;
+   reconcile the remaining v2-native surfaces with the captured contract and live
+   behavior. Verify claims about MCP persistence before describing them in UI.
+3. Perform the final purposeful mobile UX pass, resolve its concrete findings,
+   and update release notes from the actual shipped behavior.
+4. At a separately approved shipping milestone, build and verify a signed
+   candidate through the appropriate workflow, preserve its installed signing
+   lineage, and exercise install/upgrade and core flows. Public publication
+   requires its own approved release milestone; none is part of this source batch.
+
+Release sources: [historical release notes](release-alpha-notes.md),
+[Android release workflow](../.github/workflows/android-release.yml),
+[release preflight](../scripts/release.sh), and
+[draft release helper](../scripts/cut-alpha.sh). Old public-launch audits contain
+historical branch, licensing, and CI claims; inspect current state before using
+them as blockers or completion evidence.

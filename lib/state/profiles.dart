@@ -1,0 +1,1152 @@
+import 'dart:convert';
+
+import 'package:flutter/foundation.dart' show TargetPlatform;
+import 'package:flutter/services.dart'
+    show MissingPluginException, PlatformException;
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+import '../api/models.dart' show ModelRef;
+import '../api/server_probe.dart' show ServerFlavor;
+import '../domain/loopback_host.dart';
+import '../domain/orchestration_gateway.dart' show OrchestrationHostMode;
+import '../platform/platform_capabilities.dart';
+import 'model_library.dart';
+
+export '../api/server_probe.dart' show ServerFlavor;
+export '../domain/loopback_host.dart' show isLoopbackHost;
+export '../domain/orchestration_gateway.dart' show OrchestrationHostMode;
+
+/// A model (and variant) chosen for one session from inside its chat.
+class SessionModelChoice {
+  final ModelRef model;
+  final String variant;
+  const SessionModelChoice({required this.model, this.variant = ''});
+}
+
+/// One opencode server the user can connect to.
+enum ServerBackend { openCode, codex }
+
+/// Which orchestration host the AI Team plugin talks to for a profile.
+enum OrchestrationProvider {
+  /// A Gas City supervisor reached over HTTP(S).
+  gascity,
+
+  /// The recorded fixture in `tool/qa/gascity_fixture` (tests and demos).
+  fixture;
+
+  /// Maps a stored name; unknown names fall back to [gascity] so an old
+  /// profile never loses its host.
+  static OrchestrationProvider fromName(Object? name) =>
+      name == fixture.name ? fixture : gascity;
+}
+
+/// The kind of machine an AI Team host runs on, chosen by the person when
+/// they add the host and used only for the performance disclaimer
+/// (03-onboarding §4, TEAM-206). Finer than [OrchestrationHostMode]: every
+/// kind maps to one mode ([mode]), and a mode without a chosen kind takes
+/// [forMode]'s default so a config stored before this field existed still
+/// shows a disclaimer.
+enum OrchestrationHostKind {
+  /// A desktop computer that stays awake.
+  pc,
+
+  /// A laptop: sleep and lid-close pause the team.
+  laptop,
+
+  /// Windows via WSL2: sleeps like a laptop and stops with its last terminal.
+  wsl,
+
+  /// This phone (Termux); set from the host mode, never chosen in the form.
+  phone;
+
+  /// The host mode this kind belongs to.
+  OrchestrationHostMode get mode => switch (this) {
+    pc || laptop || wsl => OrchestrationHostMode.computer,
+    phone => OrchestrationHostMode.phone,
+  };
+
+  /// The default kind for a mode: a computer is a [pc] until told otherwise.
+  static OrchestrationHostKind forMode(OrchestrationHostMode mode) =>
+      switch (mode) {
+        OrchestrationHostMode.computer => pc,
+        OrchestrationHostMode.phone => phone,
+      };
+
+  /// Maps a stored name; null for an unknown or missing one so the caller
+  /// can fall back to [forMode].
+  static OrchestrationHostKind? fromName(Object? name) {
+    for (final kind in values) {
+      if (kind.name == name) return kind;
+    }
+    return null;
+  }
+}
+
+/// The AI Team plugin's per-profile settings (04-plugin-architecture §1).
+/// A profile whose [ServerProfile.orchestration] is null has the plugin
+/// off: no controller, no store keys, no widgets in the tree.
+///
+/// Immutable; [toJson] / [fromJson] round-trip every field and tolerate a
+/// stored shape from an older build (missing fields take their defaults).
+class OrchestrationConfig {
+  const OrchestrationConfig({
+    required this.provider,
+    required this.url,
+    this.city = '',
+    this.hostMode = OrchestrationHostMode.computer,
+    OrchestrationHostKind? hostKind,
+    this.front = false,
+    this.enabledAt,
+  }) : hostKind =
+           hostKind ??
+           (hostMode == OrchestrationHostMode.phone
+               ? OrchestrationHostKind.phone
+               : OrchestrationHostKind.pc);
+
+  final OrchestrationProvider provider;
+
+  /// Base URL of the host (`https://…`, `http://` to loopback or tailnet
+  /// only); for [OrchestrationProvider.fixture], the fixture directory.
+  final String url;
+
+  /// Gas City city name; empty means whatever the host reports.
+  final String city;
+
+  /// Where the host runs relative to the OpenCode server.
+  final OrchestrationHostMode hostMode;
+
+  /// The kind of machine behind [hostMode], for the disclaimer line only.
+  /// Always agrees with [hostMode]: absent or contradicting input takes
+  /// [OrchestrationHostKind.forMode].
+  final OrchestrationHostKind hostKind;
+
+  /// True once the host front is in use (Sprint B); the read adapter alone
+  /// never writes.
+  final bool front;
+
+  /// When the person turned the plugin on for this profile.
+  final DateTime? enabledAt;
+
+  OrchestrationConfig copyWith({
+    OrchestrationProvider? provider,
+    String? url,
+    String? city,
+    OrchestrationHostMode? hostMode,
+    OrchestrationHostKind? hostKind,
+    bool? front,
+    DateTime? enabledAt,
+  }) {
+    final mode = hostMode ?? this.hostMode;
+    return OrchestrationConfig(
+      provider: provider ?? this.provider,
+      url: url ?? this.url,
+      city: city ?? this.city,
+      hostMode: mode,
+      hostKind: _kindFor(mode, hostKind ?? this.hostKind),
+      front: front ?? this.front,
+      enabledAt: enabledAt ?? this.enabledAt,
+    );
+  }
+
+  /// [kind] when it belongs to [mode], else the mode's default; a kind
+  /// never contradicts the mode it is stored with.
+  static OrchestrationHostKind _kindFor(
+    OrchestrationHostMode mode,
+    OrchestrationHostKind? kind,
+  ) => kind != null && kind.mode == mode
+      ? kind
+      : OrchestrationHostKind.forMode(mode);
+
+  Map<String, dynamic> toJson() => {
+    'provider': provider.name,
+    'url': url,
+    'city': city,
+    'hostMode': hostMode.name,
+    'hostKind': hostKind.name,
+    'front': front,
+    if (enabledAt != null) 'enabledAt': enabledAt!.toUtc().toIso8601String(),
+  };
+
+  /// Decodes a stored config; null for null, non-map or url-less input so
+  /// a corrupt entry reads as "plugin off" rather than crashing the load.
+  static OrchestrationConfig? fromJson(Object? json) {
+    if (json is! Map) return null;
+    final url = json['url'];
+    if (url is! String || url.isEmpty) return null;
+    final enabledAt = json['enabledAt'];
+    final hostMode = json['hostMode'] == OrchestrationHostMode.phone.name
+        ? OrchestrationHostMode.phone
+        : OrchestrationHostMode.computer;
+    return OrchestrationConfig(
+      provider: OrchestrationProvider.fromName(json['provider']),
+      url: url,
+      city: (json['city'] ?? '').toString(),
+      hostMode: hostMode,
+      // Stored before TEAM-206, or an unknown name: the mode's default.
+      hostKind: _kindFor(
+        hostMode,
+        OrchestrationHostKind.fromName(json['hostKind']),
+      ),
+      front: json['front'] == true,
+      enabledAt: enabledAt is String ? DateTime.tryParse(enabledAt) : null,
+    );
+  }
+
+  @override
+  bool operator ==(Object other) =>
+      other is OrchestrationConfig &&
+      other.provider == provider &&
+      other.url == url &&
+      other.city == city &&
+      other.hostMode == hostMode &&
+      other.hostKind == hostKind &&
+      other.front == front &&
+      other.enabledAt == enabledAt;
+
+  @override
+  int get hashCode =>
+      Object.hash(provider, url, city, hostMode, hostKind, front, enabledAt);
+
+  @override
+  String toString() =>
+      'OrchestrationConfig(${provider.name} $url ${city.isEmpty ? '' : city}'
+      ' ${hostMode.name}/${hostKind.name}${front ? ' front' : ''})';
+}
+
+class ServerProfile {
+  final String id;
+  String name;
+  String baseUrl;
+  ServerBackend backend;
+  String username;
+  String password; // kept in secure storage, mirrored here at runtime
+  /// Runtime-only signal that the saved password could not be decrypted.
+  bool requiresPasswordReentry;
+
+  /// Runtime-only Codex connection secret. It is kept in secure storage under
+  /// its own key and is intentionally excluded from profile JSON.
+  String codexToken;
+
+  /// Codex project directory stored as profile metadata, never as a secret.
+  String codexDirectory;
+
+  /// Runtime-only signal that the saved Codex token could not be restored.
+  bool requiresCodexTokenReentry;
+
+  /// Protocol generation detected at Test/connect time. Additive: profiles
+  /// saved before flavor detection default to [ServerFlavor.v1]. Cached so a
+  /// reconnect skips re-detection; a failed connect re-probes and corrects it.
+  ServerFlavor flavor;
+
+  /// Server version reported by the last successful probe/connect, cached
+  /// alongside [flavor] for the servers list.
+  String? serverVersion;
+
+  /// AI Team plugin settings; null means the plugin is off for this server.
+  OrchestrationConfig? orchestration;
+
+  ServerProfile({
+    required this.id,
+    required this.name,
+    required this.baseUrl,
+    this.backend = ServerBackend.openCode,
+    this.username = '',
+    this.password = '',
+    this.requiresPasswordReentry = false,
+    this.codexToken = '',
+    this.codexDirectory = '',
+    this.requiresCodexTokenReentry = false,
+    this.flavor = ServerFlavor.v1,
+    this.serverVersion,
+    this.orchestration,
+  });
+
+  Map<String, dynamic> toJson() => {
+    'id': id,
+    'name': name,
+    'baseUrl': baseUrl,
+    'backend': backend.name,
+    'username': username,
+    if (backend == ServerBackend.codex) 'codexDirectory': codexDirectory,
+    'flavor': flavor.name,
+    if (serverVersion != null) 'serverVersion': serverVersion,
+    if (orchestration != null) 'orchestration': orchestration!.toJson(),
+  };
+
+  static ServerProfile fromJson(Map<String, dynamic> j) => ServerProfile(
+    id: j['id'] as String,
+    name: (j['name'] ?? '').toString(),
+    baseUrl: (j['baseUrl'] ?? '').toString(),
+    backend: j['backend'] == ServerBackend.codex.name
+        ? ServerBackend.codex
+        : ServerBackend.openCode,
+    username: (j['username'] ?? '').toString(),
+    codexDirectory: (j['codexDirectory'] ?? '').toString(),
+    flavor: j['flavor'] == ServerFlavor.v2.name
+        ? ServerFlavor.v2
+        : ServerFlavor.v1,
+    serverVersion: j['serverVersion']?.toString(),
+    orchestration: OrchestrationConfig.fromJson(j['orchestration']),
+  );
+}
+
+// `isLoopbackHost` lives in `lib/domain/loopback_host.dart` (Flutter-free)
+// and is re-exported above for the callers that import it from here.
+
+/// Splits a bare `host[:port]` into the host to judge and the authority to
+/// put in a URL, or null when it is not a plausible single address.
+///
+/// IPv6 needs both halves: `[::1]:4096` carries its port outside the
+/// brackets, while a bare `::1` has to gain brackets before it can appear in
+/// a URL at all — `http://::1` does not parse.
+({String host, String authority})? _bareAuthority(String raw) {
+  if (raw.startsWith('[')) {
+    final close = raw.indexOf(']');
+    if (close < 2) return null;
+    final rest = raw.substring(close + 1);
+    if (rest.isNotEmpty && !RegExp(r'^:\d{1,5}$').hasMatch(rest)) return null;
+    return (host: raw.substring(1, close), authority: raw);
+  }
+  final colons = ':'.allMatches(raw).length;
+  if (colons >= 2) {
+    // An unbracketed IPv6 literal: its last group cannot be told apart from
+    // a port, so the whole value is the address and the brackets are ours.
+    return (host: raw, authority: '[$raw]');
+  }
+  final host = colons == 1 ? raw.substring(0, raw.indexOf(':')) : raw;
+  if (host.isEmpty) return null;
+  return (host: host, authority: raw);
+}
+
+/// Validates the transport boundary used by both profile editing and connect.
+/// Android only permits cleartext traffic to the Termux loopback names in
+/// [isLoopbackHost]. Expands a pasted bare address into a full server URL so
+/// setup does not require knowing URL syntax. `host[:port]` and bare IPs
+/// (v4 and v6) gain a scheme: loopback becomes `http://` (the only place
+/// HTTP is allowed) and everything else becomes `https://`. Values that
+/// already carry a scheme, and values that are not a plausible single
+/// address, come back unchanged for the validator to explain.
+String normalizeServerProfileUrl(String value) {
+  final raw = value.trim();
+  if (raw.isEmpty || raw.contains('://')) return raw;
+  final bare = RegExp(r'^\[?[A-Za-z0-9._\-:]+\]?(:\d{1,5})?$');
+  if (!bare.hasMatch(raw)) return raw;
+  final parsed = _bareAuthority(raw);
+  if (parsed == null) return raw;
+  final scheme = isLoopbackHost(parsed.host) ? 'http' : 'https';
+  return '$scheme://${parsed.authority}';
+}
+
+String? validateServerProfileUrl(
+  String value, {
+  String username = '',
+  String password = '',
+}) {
+  final raw = value.trim();
+  if (raw.isEmpty) return 'Enter a server URL.';
+  if (!raw.contains('://')) {
+    return 'Include https://. Use http:// only for localhost, 127.0.0.1, '
+        'or [::1].';
+  }
+  final uri = Uri.tryParse(raw);
+  if (uri == null || !uri.hasScheme || uri.host.isEmpty) {
+    return 'Enter a complete server URL, such as https://server.example:4096.';
+  }
+  if (uri.scheme != 'https' && uri.scheme != 'http') {
+    // Both builds allow http only on loopback; only one of them reaches that
+    // loopback through Termux, so only one says so.
+    return platformCapabilities.supportsTermux
+        ? 'Server URLs must use https://, or http:// for local Termux.'
+        : 'Server URLs must use https://, or http:// for a local server.';
+  }
+  if (uri.userInfo.isNotEmpty) {
+    return 'Do not put credentials in the URL. Use the fields below.';
+  }
+  if (uri.query.isNotEmpty || uri.fragment.isNotEmpty) {
+    return 'Remove query parameters and fragments from the server URL.';
+  }
+  if (uri.path.isNotEmpty && uri.path != '/') {
+    return 'Remove the path from the server URL. Enter only its origin.';
+  }
+  if (uri.scheme == 'http' && !isLoopbackHost(uri.host)) {
+    if (username.trim().isNotEmpty || password.isNotEmpty) {
+      return 'HTTPS is required outside this device. Basic credentials must never be sent over HTTP.';
+    }
+    return 'HTTP is allowed only for localhost, 127.0.0.1, or [::1]. Use '
+        'HTTPS for LAN and remote servers.';
+  }
+  return null;
+}
+
+/// Normalizes a bare Codex WebSocket authority without changing already
+/// explicit URLs. Loopback is intentionally the only cleartext origin.
+String normalizeCodexServerUrl(String value) {
+  final raw = value.trim();
+  if (raw.isEmpty || raw.contains('://')) return raw;
+  final bare = RegExp(r'^\[?[A-Za-z0-9._\-:]+\]?(:\d{1,5})?$');
+  if (!bare.hasMatch(raw)) return raw;
+  final parsed = _bareAuthority(raw);
+  if (parsed == null) return raw;
+  final scheme = isLoopbackHost(parsed.host) ? 'ws' : 'wss';
+  return '$scheme://${parsed.authority}';
+}
+
+/// Validates a Codex origin and returns fixed, non-sensitive copy on failure.
+String? validateCodexServerUrl(String value) {
+  final raw = value.trim();
+  if (raw.isEmpty) return 'Enter a Codex server URL.';
+  final uri = Uri.tryParse(raw);
+  if (uri == null || !uri.hasScheme || uri.host.isEmpty) {
+    return 'Enter a complete Codex server URL.';
+  }
+  if (uri.scheme != 'wss' && uri.scheme != 'ws') {
+    return 'Codex server URLs must use wss://, or ws:// for a local server.';
+  }
+  if (uri.userInfo.isNotEmpty) {
+    return 'Do not put credentials in the Codex URL.';
+  }
+  if (uri.query.isNotEmpty || uri.fragment.isNotEmpty) {
+    return 'Remove query parameters and fragments from the Codex URL.';
+  }
+  if (uri.path.isNotEmpty && uri.path != '/') {
+    return 'Remove the path from the Codex server URL.';
+  }
+  if (uri.scheme == 'ws' && !isLoopbackHost(uri.host)) {
+    return 'Plain WebSocket is allowed only for a local Codex server.';
+  }
+  return null;
+}
+
+/// Validates the Codex project directory without interpreting or logging it.
+bool _containsControlCharacter(String value) => value.runes.any(
+  (character) => character <= 0x1f || (character >= 0x7f && character <= 0x9f),
+);
+
+String? validateCodexProjectDirectory(String value) {
+  if (value.isEmpty ||
+      value.length > 4096 ||
+      _containsControlCharacter(value) ||
+      (!value.startsWith('/') && !RegExp(r'^[A-Za-z]:[\\/]').hasMatch(value))) {
+    return 'Enter an absolute Codex project directory.';
+  }
+  return null;
+}
+
+/// Validates a Codex connection token without returning the token in errors.
+String? validateCodexConnectionToken(String value) {
+  if (value.isEmpty ||
+      value.length > 16384 ||
+      _containsControlCharacter(value) ||
+      RegExp(r'\s').hasMatch(value)) {
+    return 'Enter a valid Codex connection token.';
+  }
+  return null;
+}
+
+enum AppAppearance { system, light, dark }
+
+/// Selectable color identity; palettes live in lib/ui/theme_packs.dart.
+/// Reasoning / thinking intensity sent as model variant when supported.
+enum ThinkingEffort {
+  low,
+  medium,
+  high,
+  xhigh,
+  ultra;
+
+  String get wireName => switch (this) {
+    ThinkingEffort.low => 'low',
+    ThinkingEffort.medium => 'medium',
+    ThinkingEffort.high => 'high',
+    ThinkingEffort.xhigh => 'xhigh',
+    ThinkingEffort.ultra => 'ultra',
+  };
+
+  String get label => switch (this) {
+    ThinkingEffort.low => 'Low',
+    ThinkingEffort.medium => 'Medium',
+    ThinkingEffort.high => 'High',
+    ThinkingEffort.xhigh => 'Extra high',
+    ThinkingEffort.ultra => 'Ultra',
+  };
+
+  static ThinkingEffort? tryParse(String? raw) {
+    if (raw == null || raw.isEmpty) return null;
+    for (final v in ThinkingEffort.values) {
+      if (v.wireName == raw || v.name == raw) return v;
+    }
+    return null;
+  }
+}
+
+enum ThemePackId { opencode, catppuccin, gruvbox, solarized, dynamic }
+
+/// What a profile deletion actually erased, so the UI can say so and tests
+/// can assert it rather than inferring from side effects.
+class DeleteProfileResult {
+  /// Preference keys scoped to the profile (model, agent, variant, location,
+  /// provider-runtime migration flags) that were removed.
+  final Set<String> removedPreferenceKeys;
+
+  /// Offline-queue entries — prompts and their embedded attachments — dropped.
+  final int removedQueuedPrompts;
+
+  /// Unsent composer drafts dropped.
+  final int removedDrafts;
+
+  /// Whether the home-screen widget's session snapshot was cleared.
+  final bool clearedWidgetSnapshot;
+
+  /// Whether the launcher's pinned-session shortcuts were withdrawn.
+  final bool clearedPinnedShortcuts;
+
+  /// Whether the Quick Settings tile's cached count was dropped.
+  final bool clearedAttentionTile;
+
+  /// Whether the server profile itself and its Keystore password are gone.
+  ///
+  /// False means the deletion stopped before touching them: the local data
+  /// this profile owns could not be erased, so the server stays saved rather
+  /// than leaving orphaned prompts and drafts behind a removed row.
+  final bool removedProfile;
+
+  /// Plain-language descriptions of what could not be deleted, in the order
+  /// the deletion tried. Empty means the promise the UI makes — "this
+  /// server's data leaves the device" — was actually kept.
+  final List<String> failures;
+
+  const DeleteProfileResult({
+    this.removedPreferenceKeys = const {},
+    this.removedQueuedPrompts = 0,
+    this.removedDrafts = 0,
+    this.clearedWidgetSnapshot = false,
+    this.clearedPinnedShortcuts = false,
+    this.clearedAttentionTile = false,
+    this.removedProfile = true,
+    this.failures = const [],
+  });
+
+  /// Whether every piece of local data this app knows about is gone.
+  bool get complete => failures.isEmpty && removedProfile;
+
+  /// One sentence naming what survived, for a message the user can act on.
+  /// Null when the deletion was complete.
+  String? get partialDeletionMessage {
+    if (complete) return null;
+    final kept = failures.isEmpty
+        ? 'some of its local data'
+        : failures.join(', ');
+    return removedProfile
+        ? 'The server was removed, but $kept could not be deleted from this '
+              'device. Free up storage and remove it again.'
+        : 'The server was kept: $kept could not be deleted from this device, '
+              'and removing the server would have left that data behind. '
+              'Free up storage and try again.';
+  }
+}
+
+class ProfileLocation {
+  final String? directory;
+  final String? workspace;
+
+  const ProfileLocation({this.directory, this.workspace});
+}
+
+/// The platform keyring refused to hold a secret.
+///
+/// On Linux flutter_secure_storage needs a Secret Service (GNOME Keyring,
+/// KWallet) inside a desktop session; without one every write throws a
+/// [PlatformException]. That is a local storage problem, not a server one,
+/// so it carries its own product sentence instead of collapsing into
+/// "OpenCode is unreachable".
+class SecureStorageUnavailable implements Exception {
+  final String message;
+  final Object? cause;
+
+  const SecureStorageUnavailable(this.message, {this.cause});
+
+  factory SecureStorageUnavailable.forPlatform(
+    TargetPlatform platform, {
+    Object? cause,
+  }) => SecureStorageUnavailable(messageFor(platform), cause: cause);
+
+  static const linuxMessage =
+      'Could not store the password: no keyring is available. Install GNOME '
+      'Keyring or KWallet, or run the app inside a desktop session, then try '
+      'again.';
+  static const genericMessage =
+      'Could not store the password securely on this device.';
+
+  static String messageFor(TargetPlatform platform) =>
+      platform == TargetPlatform.linux ? linuxMessage : genericMessage;
+
+  @override
+  String toString() => message;
+}
+
+/// Persists server profiles. Metadata in SharedPreferences, secrets in the
+/// Android Keystore via flutter_secure_storage.
+class ProfileStore {
+  static const _profilesKey = 'oc.profiles';
+  static const _activeKey = 'oc.activeProfile';
+  static const _passwordKey = 'pw.';
+  static const _codexTokenKey = 'oc.codexToken.';
+  static const _modelKey = 'oc.model.'; // + profileId -> "providerID|modelID"
+  static const _modelExplicitKey = 'oc.modelExplicit.'; // + profileId
+  static const _agentKey = 'oc.agent.'; // + profileId
+  static const _variantKey = 'oc.variant.'; // + profileId
+  static const _thinkingEffortKey = 'oc.thinkingEffort.'; // + profileId
+  // + profileId -> JSON {sessionID: "providerID|modelID|variant"}
+  static const _sessionModelsKey = 'oc.sessionModels.';
+  static const _sessionModelsCap = 200;
+  static const _modelLibraryKey = 'oc.modelLibrary.';
+  static const _locationKey = 'oc.location.'; // + profileId -> JSON
+  static const _transcriptReasoningKey = 'oc.transcript.reasoningExpanded';
+  static const _transcriptTimestampsKey = 'oc.transcript.timestampsVisible';
+  static const _appearanceKey = 'oc.appearance';
+  static const _themePackKey = 'oc.themePack';
+  static const _providerRuntimeRefreshVersion = 'v1';
+
+  final SharedPreferences prefs;
+  final FlutterSecureStorage secure;
+
+  ProfileStore({required this.prefs, FlutterSecureStorage? secure})
+    : secure = secure ?? const FlutterSecureStorage();
+
+  List<ServerProfile> _cache = [];
+  List<ServerProfile> get profiles => List.unmodifiable(_cache);
+
+  Future<List<ServerProfile>> load() async {
+    final raw = prefs.getString(_profilesKey);
+    if (raw == null) {
+      _cache = [];
+      return _cache;
+    }
+    try {
+      final list = jsonDecode(raw) as List;
+      _cache = list
+          .whereType<Map<String, dynamic>>()
+          .map(ServerProfile.fromJson)
+          .toList();
+    } catch (_) {
+      _cache = [];
+    }
+    // Restore secrets.
+    for (final p in _cache) {
+      try {
+        if (p.backend == ServerBackend.codex) {
+          p.codexToken = await secure.read(key: '$_codexTokenKey${p.id}') ?? '';
+          p.requiresCodexTokenReentry = p.codexToken.isEmpty;
+          p.password = '';
+          p.requiresPasswordReentry = false;
+        } else {
+          p.password = await secure.read(key: '$_passwordKey${p.id}') ?? '';
+          p.requiresPasswordReentry = false;
+          p.codexToken = '';
+          p.requiresCodexTokenReentry = false;
+        }
+      } catch (_) {
+        // Keystore entries can become unreadable after a device restore or a
+        // lock-screen security change. Keep the non-secret profile usable so
+        // the user can re-enter its password instead of failing app startup.
+        if (p.backend == ServerBackend.codex) {
+          p.codexToken = '';
+          p.requiresCodexTokenReentry = true;
+          p.password = '';
+          p.requiresPasswordReentry = false;
+        } else {
+          p.password = '';
+          p.requiresPasswordReentry = true;
+          p.codexToken = '';
+          p.requiresCodexTokenReentry = false;
+        }
+      }
+    }
+    return _cache;
+  }
+
+  String _encode(List<ServerProfile> profiles) =>
+      jsonEncode(profiles.map((p) => p.toJson()).toList());
+
+  Future<void> _restoreProfiles(String? raw) async {
+    final restored = raw == null
+        ? await prefs.remove(_profilesKey)
+        : await prefs.setString(_profilesKey, raw);
+    if (!restored) {
+      throw StateError('Could not restore the saved server profiles');
+    }
+  }
+
+  Future<void> upsert(ServerProfile profile) async {
+    final previousRaw = prefs.getString(_profilesKey);
+    final next = List<ServerProfile>.of(_cache);
+    final i = _cache.indexWhere((p) => p.id == profile.id);
+    if (i >= 0) {
+      next[i] = profile;
+    } else {
+      next.add(profile);
+    }
+    if (!await prefs.setString(_profilesKey, _encode(next))) {
+      throw StateError('Could not save the server profile');
+    }
+    try {
+      if (profile.backend == ServerBackend.codex) {
+        if (profile.codexToken.isEmpty) {
+          await secure.delete(key: '$_codexTokenKey${profile.id}');
+        } else {
+          await secure.write(
+            key: '$_codexTokenKey${profile.id}',
+            value: profile.codexToken,
+          );
+        }
+      } else if (profile.password.isEmpty) {
+        await secure.delete(key: '$_passwordKey${profile.id}');
+      } else {
+        await secure.write(
+          key: '$_passwordKey${profile.id}',
+          value: profile.password,
+        );
+      }
+    } catch (error) {
+      await _restoreProfiles(previousRaw);
+      if (_isKeyringFailure(error)) {
+        throw SecureStorageUnavailable.forPlatform(
+          platformCapabilities.platform,
+          cause: error,
+        );
+      }
+      rethrow;
+    }
+    profile.requiresPasswordReentry = false;
+    profile.requiresCodexTokenReentry = false;
+    _cache = next;
+  }
+
+  /// flutter_secure_storage reports a missing or locked keyring as a
+  /// [PlatformException]; on a platform without the plugin at all the call
+  /// surfaces as [MissingPluginException].
+  static bool _isKeyringFailure(Object error) =>
+      error is PlatformException || error is MissingPluginException;
+
+  static const _probeKey = 'oc.secure.probe';
+
+  /// Null when the keyring answers, otherwise the sentence to show before the
+  /// user types a password that could not be kept. Only Linux desktops lack
+  /// a keyring in practice; elsewhere the probe is skipped.
+  Future<String?> secureStorageProblem() async {
+    final platform = platformCapabilities.platform;
+    if (platform != TargetPlatform.linux) return null;
+    try {
+      await secure.read(key: _probeKey);
+      return null;
+    } catch (error) {
+      if (_isKeyringFailure(error)) {
+        return SecureStorageUnavailable.messageFor(platform);
+      }
+      return null;
+    }
+  }
+
+  /// Every preference key this app scopes to [profileId].
+  ///
+  /// Profile-scoped keys are namespaced as `oc.<what>.<profileId>` — model,
+  /// explicit-model flag, agent, variant, and location — or carry the id as an
+  /// interior segment, as the provider-runtime migration flag does
+  /// (`oc.providerRuntimeRefresh.v1.<profileId>.<location>`). Matching the
+  /// shape rather than a fixed list means a key added later is deleted with
+  /// the profile even if nobody remembers to update this method; the app-wide
+  /// keys (`oc.profiles`, `oc.activeProfile`, `oc.offlineQueue`,
+  /// `oc.sessionDrafts`, `oc.widgetSessions`, appearance, theme) carry no id
+  /// segment and are never matched.
+  Set<String> profileScopedPreferenceKeys(String profileId) {
+    if (profileId.isEmpty) return const {};
+    final suffix = '.$profileId';
+    final infix = '.$profileId.';
+    return {
+      for (final key in prefs.getKeys())
+        if (key.startsWith('oc.') &&
+            (key.endsWith(suffix) || key.contains(infix)))
+          key,
+    };
+  }
+
+  /// Removes every preference scoped to [profileId], reporting the keys the
+  /// store refused to drop.
+  ///
+  /// `SharedPreferences.remove` answers with a bool that the old deletion
+  /// path threw away, so a full disk or a broken store left a profile's
+  /// model, agent, and location on the device while the user was told the
+  /// server had been removed. The caller decides what to do about a
+  /// non-empty result; this method only refuses to lie about it.
+  Future<Set<String>> removeScopedPreferences(String profileId) async {
+    final failed = <String>{};
+    for (final key in profileScopedPreferenceKeys(profileId)) {
+      try {
+        if (!await prefs.remove(key)) failed.add(key);
+      } catch (_) {
+        failed.add(key);
+      }
+    }
+    return failed;
+  }
+
+  /// Removes the profile, its active-profile pointer, its Keystore secret,
+  /// and every preference key scoped to it.
+  ///
+  /// Profile metadata and the password stay transactional: if the Keystore
+  /// delete fails, the saved profiles come back exactly as they were. The
+  /// scoped preference sweep runs only once that succeeded, at which point
+  /// the keys are orphaned regardless, so a failure there cannot resurrect a
+  /// deleted server. [ConnectionController.deleteProfileAndLocalData] sweeps
+  /// them *before* calling this and verifies the result, so on that path the
+  /// sweep below finds nothing left to do.
+  ///
+  /// This clears only what [ProfileStore] owns. Queued prompts, drafts, and
+  /// the home-screen widget snapshot live in shared blobs; the full cascade
+  /// is [ConnectionController.deleteProfileAndLocalData].
+  Future<void> remove(String id) async {
+    final previousRaw = prefs.getString(_profilesKey);
+    final previousActive = prefs.getString(_activeKey);
+    final next = _cache.where((profile) => profile.id != id).toList();
+    if (!await prefs.setString(_profilesKey, _encode(next))) {
+      throw StateError('Could not remove the server profile');
+    }
+    ServerProfile? removedProfile;
+    for (final profile in _cache) {
+      if (profile.id == id) {
+        removedProfile = profile;
+        break;
+      }
+    }
+    final secretKey = removedProfile?.backend == ServerBackend.codex
+        ? '$_codexTokenKey$id'
+        : '$_passwordKey$id';
+    try {
+      if (previousActive == id) await setActiveId(null);
+      await secure.delete(key: secretKey);
+    } catch (error) {
+      await _restoreProfiles(previousRaw);
+      if (previousActive == id &&
+          !await prefs.setString(_activeKey, previousActive!)) {
+        throw StateError('Could not restore the active server profile');
+      }
+      if (_isKeyringFailure(error)) {
+        throw SecureStorageUnavailable.forPlatform(
+          platformCapabilities.platform,
+          cause: error,
+        );
+      }
+      rethrow;
+    }
+    _cache = next;
+    await removeScopedPreferences(id);
+  }
+
+  String? get activeId => prefs.getString(_activeKey);
+
+  Future<void> setActiveId(String? id) async {
+    if (id == null) {
+      if (!await prefs.remove(_activeKey)) {
+        throw StateError('Could not clear the active server profile');
+      }
+    } else {
+      if (!await prefs.setString(_activeKey, id)) {
+        throw StateError('Could not save the active server profile');
+      }
+    }
+  }
+
+  ServerProfile? get active {
+    final id = activeId;
+    if (id == null) return null;
+    for (final p in _cache) {
+      if (p.id == id) return p;
+    }
+    return null;
+  }
+
+  ProfileLocation? locationFor(String profileId) {
+    final raw = prefs.getString('$_locationKey$profileId');
+    if (raw == null) return null;
+    try {
+      final value = jsonDecode(raw);
+      if (value is! Map) return null;
+      final directoryValue = value['directory'];
+      final workspaceValue = value['workspace'];
+      final directory = directoryValue is String && directoryValue.isNotEmpty
+          ? directoryValue
+          : null;
+      final workspace = workspaceValue is String && workspaceValue.isNotEmpty
+          ? workspaceValue
+          : null;
+      if (directory == null && workspace == null) return null;
+      return ProfileLocation(directory: directory, workspace: workspace);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> setLocation(
+    String profileId, {
+    String? directory,
+    String? workspace,
+  }) async {
+    final normalizedDirectory = directory?.isNotEmpty == true
+        ? directory
+        : null;
+    final normalizedWorkspace = workspace?.isNotEmpty == true
+        ? workspace
+        : null;
+    if (normalizedDirectory == null && normalizedWorkspace == null) {
+      await clearLocation(profileId);
+      return;
+    }
+    if (!await prefs.setString(
+      '$_locationKey$profileId',
+      jsonEncode({
+        'directory': normalizedDirectory,
+        'workspace': normalizedWorkspace,
+      }),
+    )) {
+      throw StateError('Could not save the selected server location');
+    }
+  }
+
+  Future<void> clearLocation(String profileId) async {
+    if (!await prefs.remove('$_locationKey$profileId')) {
+      throw StateError('Could not clear the selected server location');
+    }
+  }
+
+  String _providerRuntimeRefreshKey(
+    String profileId, {
+    String? directory,
+    String? workspace,
+  }) {
+    final location = Uri.encodeComponent(
+      '${directory ?? '<default>'}\n${workspace ?? '<default>'}',
+    );
+    return 'oc.providerRuntimeRefresh.$_providerRuntimeRefreshVersion.$profileId.$location';
+  }
+
+  bool providerRuntimeWasRefreshed(
+    String profileId, {
+    String? directory,
+    String? workspace,
+  }) =>
+      prefs.getBool(
+        _providerRuntimeRefreshKey(
+          profileId,
+          directory: directory,
+          workspace: workspace,
+        ),
+      ) ??
+      false;
+
+  Future<void> markProviderRuntimeRefreshed(
+    String profileId, {
+    String? directory,
+    String? workspace,
+  }) async {
+    if (!await prefs.setBool(
+      _providerRuntimeRefreshKey(
+        profileId,
+        directory: directory,
+        workspace: workspace,
+      ),
+      true,
+    )) {
+      throw StateError('Could not save the provider runtime migration');
+    }
+  }
+
+  // ----- per-profile model/agent selection -----
+
+  ModelLibrary modelLibraryFor(String profileId) {
+    final raw = prefs.getString('$_modelLibraryKey$profileId');
+    if (raw == null) return const ModelLibrary();
+    try {
+      return ModelLibrary.fromJson(jsonDecode(raw));
+    } on FormatException {
+      return const ModelLibrary();
+    }
+  }
+
+  Future<void> setModelLibrary(String profileId, ModelLibrary library) async {
+    final key = '$_modelLibraryKey$profileId';
+    final saved = library.favorites.isEmpty && library.recent.isEmpty
+        ? await prefs.remove(key)
+        : await prefs.setString(key, jsonEncode(library.toJson()));
+    if (!saved) throw StateError('Could not save model shortcuts');
+  }
+
+  (String?, String?) modelFor(String profileId) {
+    final v = prefs.getString('$_modelKey$profileId');
+    if (v == null || !v.contains('|')) return (null, null);
+    final parts = v.split('|');
+    return (parts[0], parts[1]);
+  }
+
+  bool modelWasExplicitlySelected(String profileId) =>
+      prefs.getBool('$_modelExplicitKey$profileId') ?? false;
+
+  Future<void> setModel(
+    String profileId,
+    String providerID,
+    String modelID, {
+    bool explicit = false,
+  }) async {
+    await prefs.setString('$_modelKey$profileId', '$providerID|$modelID');
+    await prefs.setBool('$_modelExplicitKey$profileId', explicit);
+  }
+
+  Future<void> clearModel(String profileId) async {
+    await prefs.remove('$_modelKey$profileId');
+    await prefs.remove('$_modelExplicitKey$profileId');
+    await prefs.remove('$_variantKey$profileId');
+  }
+
+  String variantFor(String profileId) =>
+      prefs.getString('$_variantKey$profileId') ?? '';
+
+  Future<void> setVariant(String profileId, String variant) async {
+    if (variant.isEmpty) {
+      await prefs.remove('$_variantKey$profileId');
+    } else {
+      await prefs.setString('$_variantKey$profileId', variant);
+    }
+  }
+
+  /// Per-session model choices for [profileId]; malformed entries are
+  /// dropped rather than surfaced.
+  Map<String, SessionModelChoice> sessionModelsFor(String profileId) {
+    final raw = prefs.getString('$_sessionModelsKey$profileId');
+    if (raw == null || raw.isEmpty) return {};
+    final Object? decoded;
+    try {
+      decoded = jsonDecode(raw);
+    } on FormatException {
+      return {};
+    }
+    if (decoded is! Map) return {};
+    final result = <String, SessionModelChoice>{};
+    for (final entry in decoded.entries) {
+      final id = entry.key.toString();
+      final value = entry.value;
+      if (id.isEmpty || value is! String) continue;
+      final parts = value.split('|');
+      if (parts.length < 2 || parts[0].isEmpty || parts[1].isEmpty) continue;
+      result[id] = SessionModelChoice(
+        model: ModelRef(providerID: parts[0], modelID: parts[1]).normalized,
+        variant: parts.length > 2 ? parts[2] : '',
+      );
+    }
+    return result;
+  }
+
+  /// Replaces the per-session model choices for [profileId]. Keeps the most
+  /// recently written [_sessionModelsCap] entries so a long-lived profile
+  /// cannot grow the preference without bound.
+  Future<void> setSessionModels(
+    String profileId,
+    Map<String, SessionModelChoice> choices,
+  ) async {
+    if (choices.isEmpty) {
+      await prefs.remove('$_sessionModelsKey$profileId');
+      return;
+    }
+    final entries = choices.entries.toList();
+    final kept = entries.length > _sessionModelsCap
+        ? entries.sublist(entries.length - _sessionModelsCap)
+        : entries;
+    final encoded = <String, String>{
+      for (final e in kept)
+        e.key:
+            '${e.value.model.providerID}|${e.value.model.modelID}|${e.value.variant}',
+    };
+    await prefs.setString('$_sessionModelsKey$profileId', jsonEncode(encoded));
+  }
+
+  ThinkingEffort thinkingEffortFor(String profileId) =>
+      ThinkingEffort.tryParse(prefs.getString('$_thinkingEffortKey$profileId')) ??
+      ThinkingEffort.medium;
+
+  Future<void> setThinkingEffort(String profileId, ThinkingEffort effort) async {
+    await prefs.setString('$_thinkingEffortKey$profileId', effort.wireName);
+  }
+
+
+  String agentFor(String profileId) =>
+      prefs.getString('$_agentKey$profileId') ?? '';
+
+  Future<void> setAgent(String profileId, String agent) =>
+      prefs.setString('$_agentKey$profileId', agent);
+
+  // ----- app-wide transcript display -----
+
+  bool get transcriptReasoningExpanded =>
+      prefs.getBool(_transcriptReasoningKey) ?? false;
+
+  bool get transcriptTimestampsVisible =>
+      prefs.getBool(_transcriptTimestampsKey) ?? false;
+
+  Future<void> setTranscriptReasoningExpanded(bool expanded) async {
+    if (!await prefs.setBool(_transcriptReasoningKey, expanded)) {
+      throw StateError('Could not save the reasoning display preference');
+    }
+  }
+
+  Future<void> setTranscriptTimestampsVisible(bool visible) async {
+    if (!await prefs.setBool(_transcriptTimestampsKey, visible)) {
+      throw StateError('Could not save the timestamp display preference');
+    }
+  }
+
+  AppAppearance get appearance => switch (prefs.getString(_appearanceKey)) {
+    'system' => AppAppearance.system,
+    'light' => AppAppearance.light,
+    _ => AppAppearance.dark,
+  };
+
+  ThemePackId get themePack {
+    final raw = prefs.getString(_themePackKey);
+    for (final pack in ThemePackId.values) {
+      if (pack.name == raw) return pack;
+    }
+    return ThemePackId.opencode;
+  }
+
+  Future<void> setThemePack(ThemePackId pack) => _saveDisplayPreference(
+    _themePackKey,
+    pack.name,
+    'Could not save the theme preference',
+  );
+
+  Future<void> setAppearance(AppAppearance appearance) =>
+      _saveDisplayPreference(
+        _appearanceKey,
+        appearance.name,
+        'Could not save the appearance preference',
+      );
+
+  Future<void> _saveDisplayPreference(
+    String key,
+    String value,
+    String error,
+  ) async {
+    try {
+      if (!await prefs.setString(key, value)) throw StateError(error);
+    } catch (_) {
+      // SharedPreferences writes its cache before the platform acknowledges.
+      // Reload so a refused preview save cannot become the next controller's
+      // apparent saved appearance, while preserving the original failure.
+      try {
+        await prefs.reload();
+      } catch (_) {
+        // The live controller still keeps the last acknowledged selection.
+      }
+      rethrow;
+    }
+  }
+}

@@ -1,0 +1,325 @@
+part of '../chat_screen.dart';
+
+class _TimelineSelection {
+  const _TimelineSelection({
+    required this.message,
+    required this.fork,
+    this.query = '',
+  });
+
+  final MessageWithParts message;
+  final bool fork;
+  final String query;
+}
+
+class _SessionSheetRow extends StatelessWidget {
+  const _SessionSheetRow({
+    required this.icon,
+    required this.label,
+    required this.value,
+  });
+
+  final IconData icon;
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) => ListTile(
+    leading: Icon(icon),
+    title: Text(label, maxLines: 1, overflow: TextOverflow.ellipsis),
+    onTap: () => Navigator.pop(context, value),
+  );
+}
+
+class _TimelineSheet extends StatefulWidget {
+  const _TimelineSheet({
+    required this.messages,
+    required this.forkMode,
+    required this.forkAvailable,
+    this.hasOlder = false,
+    this.loadingOlder = false,
+    this.olderNeedsReload = false,
+    this.olderError,
+    this.loadOlder,
+  });
+
+  final List<MessageWithParts> messages;
+  final bool forkMode;
+  final bool forkAvailable;
+  final bool hasOlder;
+  final bool loadingOlder;
+  final bool olderNeedsReload;
+  final Object? olderError;
+  final Future<void> Function()? loadOlder;
+
+  @override
+  State<_TimelineSheet> createState() => _TimelineSheetState();
+}
+
+class _TimelineSheetState extends State<_TimelineSheet> {
+  final _search = TextEditingController();
+  final _index = TranscriptSearchIndex();
+
+  String _preview(MessageWithParts message) {
+    final text = message.parts
+        .where((part) => part.type == 'text' && !part.synthetic)
+        .map((part) => part.text.trim())
+        .where((text) => text.isNotEmpty)
+        .join(' ')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+    if (text.isNotEmpty) return text;
+
+    final files = message.parts
+        .where((part) => part.type == 'file' && !part.synthetic)
+        .map((part) => part.filename?.trim())
+        .whereType<String>()
+        .where((name) => name.isNotEmpty)
+        .toList();
+    if (files.isNotEmpty) return files.join(', ');
+
+    final tools = message.parts
+        .where((part) => part.type == 'tool')
+        .map((part) => part.toolName?.trim())
+        .whereType<String>()
+        .where((name) => name.isNotEmpty)
+        .toList();
+    if (tools.isNotEmpty) {
+      return _chatL10n(context).chatUiToolsSummary(tools.join(', '));
+    }
+
+    final reasoning = message.parts
+        .where((part) => part.type == 'reasoning')
+        .map((part) => part.text.trim())
+        .firstWhere((text) => text.isNotEmpty, orElse: () => '');
+    return reasoning.isNotEmpty ? reasoning : _chatL10n(context).chatUiMessage;
+  }
+
+  bool _isForkable(MessageWithParts message) =>
+      message.info.role == 'user' &&
+      !message.info.id.startsWith('local-') &&
+      message.parts.any((part) => part.type == 'text' && !part.synthetic);
+
+  @override
+  void dispose() {
+    _search.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final largeText = MediaQuery.textScalerOf(context).scale(1) >= 1.5;
+    final query = _search.text.trim().toLowerCase();
+    final hits = _index.search(widget.messages, query);
+    final firstHits = <String, TranscriptMatch>{};
+    for (final hit in hits) {
+      firstHits.putIfAbsent(hit.messageID, () => hit);
+    }
+    final matchingIDs = hits.map((match) => match.messageID).toSet();
+    final visible = widget.messages.reversed.where((message) {
+      if (widget.forkMode && !_isForkable(message)) return false;
+      if (query.isEmpty) return true;
+      if (!widget.forkMode) return matchingIDs.contains(message.info.id);
+      final role = message.info.role == 'user'
+          ? _chatL10n(context).chatUiYouUser
+          : _chatL10n(context).chatUiOpencodeAssistant;
+      return '$role ${_preview(message)}'.toLowerCase().contains(query);
+    }).toList();
+
+    return DraggableScrollableSheet(
+      expand: false,
+      minChildSize: .5,
+      initialChildSize: largeText ? .96 : .82,
+      maxChildSize: .96,
+      snap: true,
+      snapSizes: const [.82, .96],
+      builder: (context, scrollController) => Material(
+        color: theme.colorScheme.surfaceContainerLow,
+        child: Column(
+          children: [
+            Padding(
+              padding: const EdgeInsetsDirectional.fromSTEB(20, 14, 10, 8),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          widget.forkMode
+                              ? _chatL10n(context).chatUiForkFromPrompt
+                              : _chatL10n(context).chatUiMessageTimeline,
+                          style: theme.textTheme.titleLarge,
+                        ),
+                        if (!largeText) ...[
+                          const SizedBox(height: 2),
+                          Text(
+                            widget.forkMode
+                                ? _chatL10n(
+                                    context,
+                                  ).chatUiChooseAPromptToRestoreItIn
+                                : widget.forkAvailable
+                                ? _chatL10n(
+                                    context,
+                                  ).chatUiJumpAnywhereForkRestoresAPromptFor
+                                : _chatL10n(
+                                    context,
+                                  ).chatUiJumpAnywhereInThisConversation,
+                            style: theme.textTheme.bodySmall?.copyWith(
+                              color: theme.colorScheme.onSurfaceVariant,
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+                  IconButton(
+                    tooltip: _chatL10n(context).chatUiCloseTimeline,
+                    onPressed: () => Navigator.pop(context),
+                    icon: const Icon(AppIconography.close),
+                  ),
+                ],
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsetsDirectional.fromSTEB(16, 4, 16, 10),
+              child: TextField(
+                key: const ValueKey('timeline-search'),
+                controller: _search,
+                onChanged: (_) => setState(() {}),
+                textInputAction: TextInputAction.search,
+                decoration: InputDecoration(
+                  hintText: _chatL10n(context).chatUiSearchMessages,
+                  prefixIcon: Icon(AppIconography.search),
+                  isDense: true,
+                ),
+              ),
+            ),
+            if (!widget.forkMode && query.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                child: Text(
+                  _chatL10n(context).transcriptFindTotal(hits.length),
+                ),
+              ),
+            if (widget.hasOlder)
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      widget.olderError == null
+                          ? _chatL10n(context).historyLoadedOnly
+                          : productErrorText(widget.olderError!),
+                    ),
+                    TextButton(
+                      key: const ValueKey('timeline-load-older'),
+                      onPressed: widget.loadingOlder ? null : widget.loadOlder,
+                      child: Text(
+                        widget.olderNeedsReload
+                            ? _chatL10n(context).historyReload
+                            : _chatL10n(context).historyLoadOlder,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            Expanded(
+              child: visible.isEmpty
+                  ? Center(
+                      child: Text(
+                        _chatL10n(context).chatUiNoMatchingMessages,
+                        style: TextStyle(color: AppTheme.mutedOf(theme)),
+                      ),
+                    )
+                  : ListView.separated(
+                      controller: scrollController,
+                      // Dragging the results dismisses the search keyboard so
+                      // it stops covering the list.
+                      keyboardDismissBehavior:
+                          ScrollViewKeyboardDismissBehavior.onDrag,
+                      padding: const EdgeInsetsDirectional.fromSTEB(
+                        8,
+                        0,
+                        8,
+                        20,
+                      ),
+                      itemCount: visible.length,
+                      separatorBuilder: (_, _) => const Divider(height: 1),
+                      itemBuilder: (context, index) {
+                        final message = visible[index];
+                        final isUser = message.info.role == 'user';
+                        final created = message.info.time?.created;
+                        final footer = [
+                          isUser ? _chatL10n(context).chatUiYou : 'OpenCode',
+                          if (created != null)
+                            _fmtSessionTime(created, context),
+                        ].join('  ·  ');
+                        return ListTile(
+                          key: ValueKey('timeline-row-${message.info.id}'),
+                          minVerticalPadding: 10,
+                          leading: Icon(
+                            isUser
+                                ? AppIconography.person
+                                : AppIconography.sparkle,
+                            size: 20,
+                            color: theme.colorScheme.onSurfaceVariant,
+                          ),
+                          title: TranscriptHighlight(
+                            query: query,
+                            child: Builder(
+                              builder: (context) => Text.rich(
+                                TranscriptHighlight.decorate(
+                                  context,
+                                  TextSpan(
+                                    text:
+                                        firstHits[message.info.id]?.preview ??
+                                        _preview(message),
+                                  ),
+                                ),
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                          ),
+                          subtitle: Text(footer),
+                          trailing: widget.forkAvailable && _isForkable(message)
+                              ? widget.forkMode
+                                    ? const Icon(AppIconography.branch)
+                                    : IconButton(
+                                        key: ValueKey(
+                                          'timeline-fork-${message.info.id}',
+                                        ),
+                                        tooltip: _chatL10n(
+                                          context,
+                                        ).chatUiForkFromThisPrompt,
+                                        onPressed: () => Navigator.pop(
+                                          context,
+                                          _TimelineSelection(
+                                            message: message,
+                                            fork: true,
+                                          ),
+                                        ),
+                                        icon: const Icon(AppIconography.branch),
+                                      )
+                              : null,
+                          onTap: () => Navigator.pop(
+                            context,
+                            _TimelineSelection(
+                              message: message,
+                              fork: widget.forkMode,
+                              query: widget.forkMode ? '' : _search.text.trim(),
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}

@@ -1,0 +1,865 @@
+package io.github.eslamasabry.opencode_mobile
+
+import android.Manifest
+import android.app.Activity
+import android.app.ActivityManager
+import android.app.PendingIntent
+import android.app.NotificationManager
+import android.content.ComponentName
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.net.Uri
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
+import android.os.Build
+import android.os.Handler
+import android.os.Looper
+import android.os.PowerManager
+import android.os.StatFs
+import android.provider.Settings
+import io.flutter.embedding.android.FlutterActivity
+import io.flutter.embedding.engine.FlutterEngine
+import io.flutter.plugin.common.MethodCall
+import io.flutter.plugin.common.MethodChannel
+import java.security.MessageDigest
+import java.util.concurrent.atomic.AtomicInteger
+
+class MainActivity : FlutterActivity() {
+    private val handler = Handler(Looper.getMainLooper())
+    private var permissionResult: MethodChannel.Result? = null
+    private var microphonePermissionResult: MethodChannel.Result? = null
+    private var backgroundPermissionResult: MethodChannel.Result? = null
+    private var cameraPermissionResult: MethodChannel.Result? = null
+    private var pendingCodingAlertOpen: Map<String, String>? = null
+    private var pendingSharedText: String? = null
+    private var shareChannel: MethodChannel? = null
+    private var shareDartReady = false
+    private var pendingLaunchAction: String? = null
+    private var pendingSessionLaunch: Map<String, String>? = null
+    private var shortcutChannel: MethodChannel? = null
+    private var shortcutDartReady = false
+    private var pendingSessionLink: String? = null
+    private var linkChannel: MethodChannel? = null
+    private var linkDartReady = false
+    private var readAloud: ReadAloudBridge? = null
+    private var localPdf: LocalPdfBridge? = null
+
+    override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
+        super.configureFlutterEngine(flutterEngine)
+        TailscaleHandoff(this, flutterEngine.dartExecutor.binaryMessenger)
+        localPdf?.dispose()
+        localPdf = LocalPdfBridge(this, flutterEngine.dartExecutor.binaryMessenger)
+        readAloud?.dispose()
+        readAloud = ReadAloudBridge(this, flutterEngine.dartExecutor.binaryMessenger)
+        captureCodingAlertOpen(intent)
+        captureSharedText(intent)
+        captureLaunchAction(intent)
+        captureSessionLaunch(intent)
+        captureSessionLink(intent)
+        linkDartReady = false
+        linkChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, LINK_CHANNEL_NAME)
+            .also { channel ->
+                channel.setMethodCallHandler { call, result ->
+                    when (call.method) {
+                        "consumeSessionLink" -> {
+                            // Same readiness handshake as shortcuts: Dart's
+                            // inbound handler is installed before this call,
+                            // so later links can be pushed live.
+                            linkDartReady = true
+                            val link = pendingSessionLink
+                            pendingSessionLink = null
+                            result.success(link)
+                        }
+                        else -> result.notImplemented()
+                    }
+                }
+            }
+        shortcutDartReady = false
+        shortcutChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, SHORTCUT_CHANNEL_NAME)
+            .also { channel ->
+                channel.setMethodCallHandler { call, result ->
+                    when (call.method) {
+                        "consumeLaunchAction" -> {
+                            // Readiness acknowledgment, mirroring the share
+                            // channel: Dart's inbound handler is installed
+                            // before this call, so later shortcut taps can be
+                            // pushed live instead of parked.
+                            shortcutDartReady = true
+                            val action = pendingLaunchAction
+                            pendingLaunchAction = null
+                            result.success(action)
+                        }
+                        "consumeSessionLaunch" -> {
+                            // The pinned-session tap that launched the app,
+                            // drained once; IDs only.
+                            val launch = pendingSessionLaunch
+                            pendingSessionLaunch = null
+                            result.success(launch)
+                        }
+                        "setPinnedSessions" -> {
+                            // Dart owns the payload (titles only, capped);
+                            // native only mirrors it onto the launcher.
+                            val profileID = call.argument<String>("profileID").orEmpty()
+                            val sessions = call.argument<List<Map<String, Any?>>>("sessions")
+                                .orEmpty()
+                            result.success(
+                                mapOf(
+                                    "published" to PinnedSessionShortcuts.publish(
+                                        this,
+                                        profileID = profileID,
+                                        sessions = sessions
+                                    )
+                                )
+                            )
+                        }
+                        else -> result.notImplemented()
+                    }
+                }
+            }
+        shareDartReady = false
+        shareChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, SHARE_CHANNEL_NAME)
+            .also { channel ->
+                channel.setMethodCallHandler { call, result ->
+                    when (call.method) {
+                        "consumeSharedText" -> {
+                            // Dart installs its inbound handler before this
+                            // call. This is the readiness acknowledgment for
+                            // live shares delivered during engine startup.
+                            shareDartReady = true
+                            val text = pendingSharedText
+                            pendingSharedText = null
+                            result.success(text)
+                        }
+                        else -> result.notImplemented()
+                    }
+                }
+            }
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL_NAME)
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "getCapabilities" -> result.success(capabilities())
+                    "getSigningCertificateSha256" ->
+                        result.success(signingCertificateSha256())
+                    "requestRunCommandPermission" -> requestRunCommandPermission(result)
+                    "openTermux" -> result.success(openTermux())
+                    "openAppSettings" -> {
+                        startActivity(
+                            Intent(
+                                Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                                Uri.parse("package:$packageName")
+                            )
+                        )
+                        result.success(true)
+                    }
+                    "runInTermux" -> runInTermux(call, result)
+                    else -> result.notImplemented()
+                }
+            }
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, VOICE_CHANNEL_NAME)
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "getDeviceInfo" -> result.success(voiceDeviceInfo())
+                    "requestMicrophonePermission" -> requestMicrophonePermission(result)
+                    "openAppSettings" -> {
+                        startActivity(
+                            Intent(
+                                Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                                Uri.parse("package:$packageName")
+                            )
+                        )
+                        result.success(null)
+                    }
+                    else -> result.notImplemented()
+                }
+            }
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CAMERA_CHANNEL_NAME)
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "hasCamera" -> result.success(hasCamera())
+                    "requestCameraPermission" -> requestCameraPermission(result)
+                    "openAppSettings" -> {
+                        startActivity(
+                            Intent(
+                                Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                                Uri.parse("package:$packageName")
+                            )
+                        )
+                        result.success(null)
+                    }
+                    else -> result.notImplemented()
+                }
+            }
+        val background = MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            BACKGROUND_CHANNEL_NAME
+        )
+        // Notification-action broadcasts reach Dart through this channel even
+        // while the Activity is backgrounded; see CodingActionReceiver.
+        backgroundChannel = background
+        background
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "getStatus" -> result.success(backgroundStatus())
+                    "enable" -> enableBackgroundConnection(result)
+                    "disable" -> {
+                        BackgroundConnectionService.stop(this)
+                        result.success(backgroundStatus(enabled = false))
+                    }
+                    "requestBatteryOptimizationExemption" -> {
+                        requestBatteryOptimizationExemption()
+                        result.success(backgroundStatus())
+                    }
+                    "monitorNetworkPolicy" -> {
+                        val connectivity = getSystemService(ConnectivityManager::class.java)
+                        val capabilities = connectivity.getNetworkCapabilities(connectivity.activeNetwork)
+                        result.success(mapOf("wifi" to (capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true)))
+                    }
+                    "showCodingAlert" -> {
+                        val kind = call.argument<String>("kind").orEmpty()
+                        val sessionID = call.argument<String>("sessionID").orEmpty()
+                        val key = call.argument<String>("key").orEmpty()
+                        val quickReply = call.argument<Boolean>("quickReply") ?: false
+                        val requestID = call.argument<String>("requestID").orEmpty()
+                        result.success(
+                            mapOf(
+                                "shown" to BackgroundConnectionService.showCodingAlert(
+                                    this,
+                                    kind = kind,
+                                    sessionID = sessionID,
+                                    key = key,
+                                    quickReply = quickReply,
+                                    requestID = requestID,
+                                    profileID = call.argument<String>("profileID").orEmpty(),
+                                    allowActions = call.argument<Boolean>("allowActions") ?: true,
+                                    monitorToken = call.argument<String>("monitorToken").orEmpty(),
+                                    subtext = call.argument<String>("subtext").orEmpty()
+                                )
+                            )
+                        )
+                    }
+                    "dismissCodingAlert" -> {
+                        val key = call.argument<String>("key").orEmpty()
+                        result.success(
+                            mapOf(
+                                "dismissed" to BackgroundConnectionService.dismissCodingAlert(
+                                    this,
+                                    key
+                                )
+                            )
+                        )
+                    }
+                    "consumeCodingAlertOpen" -> {
+                        val pending = pendingCodingAlertOpen
+                        pendingCodingAlertOpen = null
+                        result.success(pending ?: emptyMap<String, String>())
+                    }
+                    "refreshHomeWidget" -> {
+                        SessionsWidgetProvider.refreshAll(this)
+                        result.success(mapOf("refreshed" to true))
+                    }
+                    "updateLiveStatus" -> {
+                        result.success(
+                            mapOf(
+                                "updated" to BackgroundConnectionService.updateLiveStatus(
+                                    this,
+                                    runningCount = call.argument<Number>("runningCount")?.toInt() ?: 0,
+                                    pendingCount = call.argument<Number>("pendingCount")?.toInt() ?: 0,
+                                    title = call.argument<String>("title"),
+                                    detail = call.argument<String>("detail")
+                                )
+                            )
+                        )
+                    }
+                    else -> result.notImplemented()
+                }
+            }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun signingCertificateSha256(): String? {
+        val info = packageManager.getPackageInfo(
+            packageName,
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                PackageManager.GET_SIGNING_CERTIFICATES
+            } else {
+                PackageManager.GET_SIGNATURES
+            }
+        )
+        val signature = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            info.signingInfo?.apkContentsSigners?.singleOrNull()
+        } else {
+            info.signatures?.singleOrNull()
+        } ?: return null
+        return MessageDigest.getInstance("SHA-256")
+            .digest(signature.toByteArray())
+            .joinToString("") { byte -> "%02X".format(byte) }
+    }
+
+    override fun cleanUpFlutterEngine(flutterEngine: FlutterEngine) {
+        localPdf?.dispose()
+        localPdf = null
+        readAloud?.dispose()
+        readAloud = null
+        if (backgroundChannel != null) backgroundChannel = null
+        shareChannel = null
+        shareDartReady = false
+        shortcutChannel = null
+        shortcutDartReady = false
+        linkChannel = null
+        linkDartReady = false
+        super.cleanUpFlutterEngine(flutterEngine)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        readAloud?.resume()
+    }
+
+    override fun onPause() {
+        readAloud?.pause()
+        super.onPause()
+    }
+
+    override fun onDestroy() {
+        localPdf?.dispose()
+        localPdf = null
+        readAloud?.dispose()
+        readAloud = null
+        super.onDestroy()
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        captureCodingAlertOpen(intent)
+        if (captureSharedText(intent)) {
+            // Delivered live when Dart is already listening; otherwise it
+            // waits in pendingSharedText for the consume call.
+            val channel = shareChannel
+            val text = pendingSharedText
+            if (shareDartReady && channel != null && text != null) {
+                pendingSharedText = null
+                channel.invokeMethod("shared", text)
+            }
+        }
+        if (captureLaunchAction(intent)) {
+            // Same delivery rule as shares: live when Dart is listening,
+            // otherwise parked until consumeLaunchAction.
+            val channel = shortcutChannel
+            val action = pendingLaunchAction
+            if (shortcutDartReady && channel != null && action != null) {
+                pendingLaunchAction = null
+                channel.invokeMethod("launched", action)
+            }
+        }
+        if (captureSessionLaunch(intent)) {
+            val channel = shortcutChannel
+            val launch = pendingSessionLaunch
+            if (shortcutDartReady && channel != null && launch != null) {
+                pendingSessionLaunch = null
+                channel.invokeMethod("launchedSession", launch)
+            }
+        }
+        if (captureSessionLink(intent)) {
+            // Live when Dart is listening, otherwise parked until
+            // consumeSessionLink.
+            val channel = linkChannel
+            val link = pendingSessionLink
+            if (linkDartReady && channel != null && link != null) {
+                pendingSessionLink = null
+                channel.invokeMethod("linked", link)
+            }
+        }
+    }
+
+    /// A pinned-session launcher shortcut (PinnedSessionShortcuts) tapped
+    /// from the home screen. Only the two IDs travel; both extras are removed
+    /// so a configuration change does not replay the tap, and Dart decides
+    /// whether the named profile is the active one before opening anything.
+    private fun captureSessionLaunch(intent: Intent?): Boolean {
+        if (intent == null) return false
+        if (!intent.hasExtra(EXTRA_LAUNCH_SESSION)) return false
+        val sessionID = intent.getStringExtra(EXTRA_LAUNCH_SESSION)?.trim().orEmpty()
+        val profileID = intent.getStringExtra(EXTRA_LAUNCH_PROFILE)?.trim().orEmpty()
+        intent.removeExtra(EXTRA_LAUNCH_SESSION)
+        intent.removeExtra(EXTRA_LAUNCH_PROFILE)
+        if (sessionID.isEmpty() || profileID.isEmpty()) return false
+        pendingSessionLaunch = mapOf("profileID" to profileID, "sessionID" to sessionID)
+        return true
+    }
+
+    /// A session handoff link (AndroidManifest VIEW filter for
+    /// opencode-mobile://session) or an AI Team link (opencode-mobile://team,
+    /// TEAM-203). Only the links' own scheme and hosts are accepted and only
+    /// the URI text crosses to Dart, which validates the route identifiers
+    /// it may carry. The intent's action and data are
+    /// cleared so a configuration change does not replay the open. This
+    /// bridge never connects, creates a session or sends anything.
+    private fun captureSessionLink(intent: Intent?): Boolean {
+        if (intent == null || intent.action != Intent.ACTION_VIEW) return false
+        val data = intent.data ?: return false
+        if (!data.scheme.equals(LINK_SCHEME, ignoreCase = true)) return false
+        if (!data.host.equals(LINK_HOST, ignoreCase = true) &&
+            !data.host.equals(TEAM_LINK_HOST, ignoreCase = true)
+        ) return false
+        val text = data.toString()
+        // Consume the open before deciding, so a rejected link is not
+        // replayed either.
+        intent.action = Intent.ACTION_MAIN
+        intent.data = null
+        if (text.isBlank() || text.length > LINK_MAX_LENGTH) return false
+        pendingSessionLink = text
+        return true
+    }
+
+    /// A static launcher shortcut (res/xml/shortcuts.xml) tapped from the
+    /// home screen. Only the whitelisted action ids are accepted; anything
+    /// else is dropped. The extra is removed so a configuration change does
+    /// not replay the tap, and the bridge itself never connects, creates a
+    /// session or sends anything: Dart decides where the action goes.
+    private fun captureLaunchAction(intent: Intent?): Boolean {
+        if (intent == null) return false
+        if (!intent.hasExtra(EXTRA_LAUNCH_ACTION)) return false
+        val action = intent.getStringExtra(EXTRA_LAUNCH_ACTION)?.trim().orEmpty()
+        intent.removeExtra(EXTRA_LAUNCH_ACTION)
+        if (action !in LAUNCH_ACTIONS) return false
+        pendingLaunchAction = action
+        return true
+    }
+
+    /// Text shared from another app through the system share sheet. Only
+    /// plain text is accepted; the subject, when present, becomes a first
+    /// line so a shared link keeps its title.
+    private fun captureSharedText(intent: Intent?): Boolean {
+        if (intent == null || intent.action != Intent.ACTION_SEND) return false
+        val type = intent.type ?: return false
+        if (!type.startsWith("text/")) return false
+        val body = intent.getStringExtra(Intent.EXTRA_TEXT)?.trim().orEmpty()
+        val subject = intent.getStringExtra(Intent.EXTRA_SUBJECT)?.trim().orEmpty()
+        if (body.isEmpty() && subject.isEmpty()) return false
+        pendingSharedText = when {
+            subject.isEmpty() -> body
+            body.isEmpty() -> subject
+            body.startsWith(subject) -> body
+            else -> "$subject\n$body"
+        }
+        // Consume the share so a configuration change does not replay it.
+        intent.action = Intent.ACTION_MAIN
+        intent.removeExtra(Intent.EXTRA_TEXT)
+        intent.removeExtra(Intent.EXTRA_SUBJECT)
+        return true
+    }
+
+    private fun captureCodingAlertOpen(intent: Intent?) {
+        if (intent == null) return
+        val kind = intent.getStringExtra(
+            BackgroundConnectionService.EXTRA_CODING_ALERT_KIND
+        ).orEmpty()
+        val sessionID = intent.getStringExtra(
+            BackgroundConnectionService.EXTRA_CODING_ALERT_SESSION_ID
+        ).orEmpty()
+        val profileID = intent.getStringExtra(
+            BackgroundConnectionService.EXTRA_CODING_ALERT_PROFILE_ID
+        ).orEmpty()
+        if (kind.isNotBlank() && sessionID.isNotBlank()) {
+            pendingCodingAlertOpen = mapOf(
+                "kind" to kind,
+                "sessionID" to sessionID,
+                // Set by widget-row taps only; Dart drops the destination
+                // when it names a profile other than the active one.
+                "profileID" to profileID,
+                "monitorToken" to intent.getStringExtra(BackgroundConnectionService.EXTRA_MONITOR_TOKEN).orEmpty()
+            )
+        }
+        intent.removeExtra(BackgroundConnectionService.EXTRA_CODING_ALERT_KIND)
+        intent.removeExtra(BackgroundConnectionService.EXTRA_CODING_ALERT_SESSION_ID)
+        intent.removeExtra(BackgroundConnectionService.EXTRA_CODING_ALERT_PROFILE_ID)
+        intent.removeExtra(BackgroundConnectionService.EXTRA_MONITOR_TOKEN)
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        when (requestCode) {
+            RUN_COMMAND_PERMISSION_REQUEST -> {
+                val result = permissionResult ?: return
+                permissionResult = null
+                result.success(grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED)
+            }
+            MICROPHONE_PERMISSION_REQUEST -> {
+                val result = microphonePermissionResult ?: return
+                microphonePermissionResult = null
+                val granted = grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED
+                val status = if (granted) {
+                    if (readAloud?.beforeMicrophoneCapture() != true) {
+                        result.error("voice_unavailable", "Local voice input is unavailable.", null)
+                        return
+                    }
+                    "granted"
+                } else if (!shouldShowRequestPermissionRationale(Manifest.permission.RECORD_AUDIO)) {
+                    "permanentlyDenied"
+                } else {
+                    "denied"
+                }
+                result.success(status)
+            }
+            CAMERA_PERMISSION_REQUEST -> {
+                val result = cameraPermissionResult ?: return
+                cameraPermissionResult = null
+                val granted = grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED
+                val status = if (granted) {
+                    "granted"
+                } else if (!shouldShowRequestPermissionRationale(Manifest.permission.CAMERA)) {
+                    "permanentlyDenied"
+                } else {
+                    "denied"
+                }
+                result.success(status)
+            }
+            BACKGROUND_NOTIFICATION_PERMISSION_REQUEST -> {
+                val result = backgroundPermissionResult ?: return
+                backgroundPermissionResult = null
+                val granted = grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED
+                if (granted) {
+                    startBackgroundConnection(result)
+                } else {
+                    result.error(
+                        "notification_denied",
+                        "Notification access is required so Android can show the live connection.",
+                        null
+                    )
+                }
+            }
+        }
+    }
+
+    private fun enableBackgroundConnection(result: MethodChannel.Result) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            if (backgroundPermissionResult != null) {
+                result.error("permission_in_progress", "A notification permission request is open.", null)
+                return
+            }
+            backgroundPermissionResult = result
+            requestPermissions(
+                arrayOf(Manifest.permission.POST_NOTIFICATIONS),
+                BACKGROUND_NOTIFICATION_PERMISSION_REQUEST
+            )
+            return
+        }
+        startBackgroundConnection(result)
+    }
+
+    private fun startBackgroundConnection(result: MethodChannel.Result) {
+        try {
+            BackgroundConnectionService.start(this)
+            result.success(backgroundStatus(enabled = true))
+        } catch (error: Exception) {
+            result.error(
+                "foreground_service_failed",
+                error.message ?: "Android could not start the live connection.",
+                null
+            )
+        }
+    }
+
+    private fun backgroundStatus(enabled: Boolean = BackgroundConnectionService.active): Map<String, Any> {
+        val notifications = getSystemService(NotificationManager::class.java)
+        val notificationGranted = Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+            notifications.areNotificationsEnabled()
+        val power = getSystemService(PowerManager::class.java)
+        return mapOf(
+            "enabled" to enabled,
+            "active" to BackgroundConnectionService.active,
+            "notificationGranted" to notificationGranted,
+            "batteryOptimizationIgnored" to power.isIgnoringBatteryOptimizations(packageName)
+        )
+    }
+
+    private fun requestBatteryOptimizationExemption() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return
+        val power = getSystemService(PowerManager::class.java)
+        if (power.isIgnoringBatteryOptimizations(packageName)) return
+        startActivity(
+            Intent(
+                Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                Uri.parse("package:$packageName")
+            )
+        )
+    }
+
+    private fun voiceDeviceInfo(): Map<String, Any> {
+        val storage = StatFs(filesDir.absolutePath)
+        val activityManager = getSystemService(ActivityManager::class.java)
+        return mapOf(
+            "availableStorageBytes" to storage.availableBytes,
+            "memoryClassMb" to activityManager.memoryClass,
+            "supportedAbis" to Build.SUPPORTED_ABIS.toList(),
+            "hasMicrophone" to packageManager.hasSystemFeature(PackageManager.FEATURE_MICROPHONE)
+        )
+    }
+
+    private fun hasCamera(): Boolean =
+        packageManager.hasSystemFeature(PackageManager.FEATURE_CAMERA_ANY)
+
+    /// Mirrors [requestMicrophonePermission]. `shouldShowRequestPermissionRationale`
+    /// is false both before the very first prompt and after "don't ask again",
+    /// so a remembered "we have asked once" flag is what separates the two.
+    private fun requestCameraPermission(result: MethodChannel.Result) {
+        if (checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+            result.success("granted")
+            return
+        }
+        val permissionPreferences = getSharedPreferences("camera_permissions", MODE_PRIVATE)
+        if (permissionPreferences.getBoolean("camera_requested", false) &&
+            !shouldShowRequestPermissionRationale(Manifest.permission.CAMERA)
+        ) {
+            result.success("permanentlyDenied")
+            return
+        }
+        if (cameraPermissionResult != null) {
+            result.error("permission_in_progress", "A camera permission request is already open.", null)
+            return
+        }
+        cameraPermissionResult = result
+        permissionPreferences.edit().putBoolean("camera_requested", true).apply()
+        requestPermissions(arrayOf(Manifest.permission.CAMERA), CAMERA_PERMISSION_REQUEST)
+    }
+
+    private fun requestMicrophonePermission(result: MethodChannel.Result) {
+        if (readAloud?.beforeMicrophoneCapture() != true) {
+            result.error("voice_unavailable", "Local voice input is unavailable.", null)
+            return
+        }
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+            result.success("granted")
+            return
+        }
+        val permissionPreferences = getSharedPreferences("voice_permissions", MODE_PRIVATE)
+        if (permissionPreferences.getBoolean("microphone_requested", false) &&
+            !shouldShowRequestPermissionRationale(Manifest.permission.RECORD_AUDIO)
+        ) {
+            result.success("permanentlyDenied")
+            return
+        }
+        if (microphonePermissionResult != null) {
+            result.error("permission_in_progress", "A microphone permission request is already open.", null)
+            return
+        }
+        microphonePermissionResult = result
+        permissionPreferences.edit().putBoolean("microphone_requested", true).apply()
+        val permissions = mutableListOf(Manifest.permission.RECORD_AUDIO)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            permissions.add(Manifest.permission.POST_NOTIFICATIONS)
+        }
+        requestPermissions(permissions.toTypedArray(), MICROPHONE_PERMISSION_REQUEST)
+    }
+
+    private fun capabilities(): Map<String, Any?> {
+        val packageInfo = try {
+            packageManager.getPackageInfo(TERMUX_PACKAGE, 0)
+        } catch (_: PackageManager.NameNotFoundException) {
+            null
+        }
+        return mapOf(
+            "installed" to (packageInfo != null),
+            "version" to packageInfo?.versionName,
+            "serviceAvailable" to isRunCommandServiceAvailable(),
+            "protocolSupported" to supportsRunCommandProtocol(packageInfo?.versionName),
+            "permissionGranted" to hasRunCommandPermission()
+        )
+    }
+
+    private fun requestRunCommandPermission(result: MethodChannel.Result) {
+        if (!isPackageInstalled(TERMUX_PACKAGE)) {
+            result.error("termux_missing", "Termux is not installed.", null)
+            return
+        }
+        if (hasRunCommandPermission()) {
+            result.success(true)
+            return
+        }
+        if (permissionResult != null) {
+            result.error("permission_in_progress", "A permission request is already open.", null)
+            return
+        }
+        permissionResult = result
+        requestPermissions(arrayOf(RUN_COMMAND_PERMISSION), RUN_COMMAND_PERMISSION_REQUEST)
+    }
+
+    private fun runInTermux(call: MethodCall, result: MethodChannel.Result) {
+        val script = call.argument<String>("script").orEmpty()
+        if (script.isBlank()) {
+            result.error("invalid_script", "The Termux command is empty.", null)
+            return
+        }
+        if (!hasRunCommandPermission()) {
+            result.error(
+                "permission_denied",
+                "OpenCode does not have Termux's RUN_COMMAND permission.",
+                null
+            )
+            return
+        }
+        if (!isRunCommandServiceAvailable()) {
+            result.error(
+                "service_unavailable",
+                "This Termux build does not expose RunCommandService.",
+                null
+            )
+            return
+        }
+
+        val executionId = nextExecutionId.getAndIncrement()
+        val timeoutMs = (call.argument<Number>("timeoutMs")?.toLong() ?: 30_000L)
+            .coerceIn(1_000L, 120_000L)
+        val timeout = Runnable {
+            if (TermuxCommandRegistry.remove(executionId)) {
+                result.error(
+                    "command_timeout",
+                    "Termux did not return a command result within ${timeoutMs / 1000} seconds.",
+                    null
+                )
+            }
+        }
+
+        TermuxCommandRegistry.register(executionId) { bundle ->
+            handler.removeCallbacks(timeout)
+            handler.post {
+                if (bundle == null) {
+                    result.error("missing_result", "Termux returned no result bundle.", null)
+                    return@post
+                }
+                result.success(
+                    mapOf(
+                        "stdout" to bundle.getString("stdout", ""),
+                        "stderr" to bundle.getString("stderr", ""),
+                        "exitCode" to bundle.getInt("exitCode", -1),
+                        "err" to bundle.getInt("err", Activity.RESULT_CANCELED),
+                        "errorMessage" to bundle.getString("errmsg", "")
+                    )
+                )
+            }
+        }
+        handler.postDelayed(timeout, timeoutMs)
+
+        val callbackIntent = Intent(this, TermuxResultService::class.java).apply {
+            data = Uri.parse("opencode://termux-result/$executionId/${System.nanoTime()}")
+            putExtra(EXTRA_EXECUTION_ID, executionId)
+        }
+        val callback = PendingIntent.getService(
+            this,
+            executionId,
+            callbackIntent,
+            PendingIntent.FLAG_ONE_SHOT or PendingIntent.FLAG_MUTABLE
+        )
+        val command = Intent(ACTION_RUN_COMMAND).apply {
+            component = ComponentName(TERMUX_PACKAGE, RUN_COMMAND_SERVICE)
+            putExtra(EXTRA_COMMAND_PATH, TERMUX_BASH)
+            putExtra(EXTRA_ARGUMENTS, arrayOf("-s"))
+            putExtra(EXTRA_STDIN, script)
+            putExtra(EXTRA_WORKDIR, call.argument<String>("workdir") ?: TERMUX_HOME)
+            putExtra(EXTRA_BACKGROUND, call.argument<Boolean>("background") ?: true)
+            putExtra(EXTRA_PENDING_INTENT, callback)
+            putExtra(EXTRA_COMMAND_LABEL, "OpenCode mobile")
+        }
+
+        try {
+            startService(command)
+        } catch (error: Exception) {
+            handler.removeCallbacks(timeout)
+            TermuxCommandRegistry.remove(executionId)
+            result.error("dispatch_failed", error.message ?: "Termux rejected the command.", null)
+        }
+    }
+
+    private fun openTermux(): Boolean {
+        val intent = packageManager.getLaunchIntentForPackage(TERMUX_PACKAGE) ?: return false
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        startActivity(intent)
+        return true
+    }
+
+    private fun hasRunCommandPermission(): Boolean =
+        checkSelfPermission(RUN_COMMAND_PERMISSION) == PackageManager.PERMISSION_GRANTED
+
+    private fun isRunCommandServiceAvailable(): Boolean = try {
+        packageManager.getServiceInfo(ComponentName(TERMUX_PACKAGE, RUN_COMMAND_SERVICE), 0)
+        true
+    } catch (_: PackageManager.NameNotFoundException) {
+        false
+    }
+
+    private fun supportsRunCommandProtocol(versionName: String?): Boolean {
+        val numbers = Regex("\\d+").findAll(versionName.orEmpty())
+            .map { it.value.toIntOrNull() ?: 0 }
+            .take(2)
+            .toList()
+        if (numbers.size < 2) return false
+        return numbers[0] > 0 || numbers[1] >= 109
+    }
+
+    private fun isPackageInstalled(packageName: String): Boolean = try {
+        packageManager.getPackageInfo(packageName, 0)
+        true
+    } catch (_: PackageManager.NameNotFoundException) {
+        false
+    }
+
+    companion object {
+        // The live background channel, readable by CodingActionReceiver while
+        // the engine survives in the backgrounded process.
+        @Volatile
+        var backgroundChannel: MethodChannel? = null
+
+        private const val CHANNEL_NAME = "oc/termux"
+        private const val VOICE_CHANNEL_NAME = "oc/voice"
+        private const val CAMERA_CHANNEL_NAME = "oc/camera"
+        private const val BACKGROUND_CHANNEL_NAME = "oc/background"
+        private const val SHARE_CHANNEL_NAME = "oc/share"
+        private const val SHORTCUT_CHANNEL_NAME = "oc/shortcut"
+        private const val LINK_CHANNEL_NAME = "oc/link"
+        // The session handoff link shape Dart's SessionLink.parse accepts.
+        private const val LINK_SCHEME = "opencode-mobile"
+        private const val LINK_HOST = "session"
+        private const val TEAM_LINK_HOST = "team"
+        private const val LINK_MAX_LENGTH = 1024
+        // Intent extra set by res/xml/shortcuts.xml; values are the shortcut
+        // ids Dart's LaunchAction enum understands.
+        const val EXTRA_LAUNCH_ACTION = "oc.shortcut"
+        // The static shortcut ids plus the Quick Settings tile's action
+        // (AttentionTileService.LAUNCH_ACTION_ACTIVITY).
+        private val LAUNCH_ACTIONS = setOf("connect", "new_task", "activity")
+        // Intent extras set by PinnedSessionShortcuts; a pinned-session tap
+        // carries exactly these two IDs and nothing else.
+        const val EXTRA_LAUNCH_PROFILE = "oc.shortcut.profile"
+        const val EXTRA_LAUNCH_SESSION = "oc.shortcut.session"
+        private const val TERMUX_PACKAGE = "com.termux"
+        private const val TERMUX_HOME = "/data/data/com.termux/files/home"
+        private const val TERMUX_BASH = "/data/data/com.termux/files/usr/bin/bash"
+        private const val RUN_COMMAND_PERMISSION = "com.termux.permission.RUN_COMMAND"
+        private const val RUN_COMMAND_PERMISSION_REQUEST = 4701
+        private const val MICROPHONE_PERMISSION_REQUEST = 4702
+        private const val BACKGROUND_NOTIFICATION_PERMISSION_REQUEST = 4703
+        private const val CAMERA_PERMISSION_REQUEST = 4704
+        private const val ACTION_RUN_COMMAND = "com.termux.RUN_COMMAND"
+        private const val RUN_COMMAND_SERVICE = "com.termux.app.RunCommandService"
+        private const val EXTRA_COMMAND_PATH = "com.termux.RUN_COMMAND_PATH"
+        private const val EXTRA_ARGUMENTS = "com.termux.RUN_COMMAND_ARGUMENTS"
+        private const val EXTRA_STDIN = "com.termux.RUN_COMMAND_STDIN"
+        private const val EXTRA_WORKDIR = "com.termux.RUN_COMMAND_WORKDIR"
+        private const val EXTRA_BACKGROUND = "com.termux.RUN_COMMAND_BACKGROUND"
+        private const val EXTRA_PENDING_INTENT = "com.termux.RUN_COMMAND_PENDING_INTENT"
+        private const val EXTRA_COMMAND_LABEL = "com.termux.RUN_COMMAND_COMMAND_LABEL"
+        private const val EXTRA_EXECUTION_ID = "oc.executionId"
+        private val nextExecutionId = AtomicInteger(1)
+    }
+}
